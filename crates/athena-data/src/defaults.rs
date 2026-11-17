@@ -173,6 +173,40 @@ source = "s"
     }
 
     #[test]
+    fn every_mode_default_is_selected_for_code_and_tests_and_names_the_drain_modes() {
+        let model = DefaultsModel::parse(REPO_DEFAULTS).unwrap();
+        let entry = model.get("every-mode").unwrap();
+        assert_eq!(entry.applies_to, ["code", "tests", "config", "build"]);
+        assert!(
+            entry
+                .source
+                .contains("records/introspections/2026-11/20261106-022422-jkfa.json")
+        );
+        assert!(entry.statement.contains(
+            "Modes of drain: serial drain(), max_concurrency = 1, max_concurrency > 1. "
+        ));
+        assert!(entry.statement.contains("Prose-only"));
+        let line = "- every-mode [code, tests, config, build]: Every behavior criterion for a multi-mode flow needs one demonstration per shipped mode, with expected values.\n";
+        // Select the defaults for one class the way the reader sees them.
+        let render_for = |class: &str| {
+            DefaultsModel {
+                version: model.version,
+                defaults: model
+                    .defaults
+                    .iter()
+                    .filter(|d| d.applies_to.iter().any(|c| c == "*" || c == class))
+                    .cloned()
+                    .collect(),
+            }
+            .render()
+        };
+        assert!(render_for("code").contains(line));
+        assert!(render_for("tests").contains(line));
+        assert!(!render_for("docs").contains("- every-mode ["));
+        assert!(model.render().contains(line));
+    }
+
+    #[test]
     fn duplicates_are_refused() {
         let text = r#"
 version = 1

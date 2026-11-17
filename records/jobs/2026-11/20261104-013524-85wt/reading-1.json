@@ -1,0 +1,140 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261104-013524-85wt",
+  "n": 1,
+  "at": "2026-11-16T06:09:19.414454113Z",
+  "invocation_seq": 1,
+  "base_commit": "ed334333dc209ea973eadbfe5ddc88735a4e56da",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make the drain continue past every item that stops on itself",
+  "summary": "The drain should pass over any item that ends in a self-stopping state (paused, flagged, awaiting diagnosis, failed, held, skipped, needs-accepting, waiting). It should record each item's state and reason in the summary and run the next runnable item while budget and slots remain. One code list names every item-ending state, a test fails when a state is added without being handled, and one test per state drives an item into it and shows the drain continuing.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Per-state tests and an exhaustiveness test, with fmt, clippy and test as criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that the next item landed, not that wiring exists."
+    },
+    {
+      "id": "small",
+      "how": "One change in the drain and its tests."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs and crates/athena-cli/tests/drain.rs. The ItemEnd enum (~line 1423) lists Landed, Failed, Budget, JobLimit, Stop, Idle, NeedsAccepting, Held, Skipped, Waiting, Paused(reason), Flagged(reason) and Awaiting(reason). Drain::finish (~line 2684) maps each to pass_over, and take_until_done (~line 2783) loops until the queue is empty or the run has stopped. Entry point: the drain loop over Steps in drain.rs. The Stop enum (~line 1047) has an ALL-style list. No record or data file is added under crates/, so check_record_file and AnyRecord are not touched.",
+    "Goal and audience: the operator running `athena drain` for a batch, who today sees it stop on one failing item. The result is checked by the verifier and by drain tests. Existing tests at crates/athena-cli/tests/drain.rs lines ~787-1134 and 1650-1720 already cover paused, flagged and double-failure pass-over, so the new work extends them to every state.",
+    "Term state: an item-ending state is a variant of ItemEnd that is not Landed and that ends one item without ending the run. Budget, JobLimit, Stop and Idle are run-ending and listed separately in the same list, as are the run-ending Stop reasons.",
+    "Reading: the one list is a const or fn in drain.rs that returns, for each ItemEnd variant, whether it continues or ends the run. The exhaustiveness test uses a match with no wildcard arm, so a new variant fails to compile, plus a runtime check that every listed state has a test. The summary entry is the existing pass_over line, which carries the job and the reason. If the summary lacks the state name, add it.",
+    "No failure-cause sorting: StopCause (ProducerAuth, LowDisk) stays as it is, so an environment cause still ends the run through Stop::Environment. That is the existing run-ending rule, not a new one. The in-flight flagged-twice job is not duplicated: its test stays, and the new tests cover the other states.",
+    "Environment: none. Local cargo only, with the stub Steps in tests. No CI, push or records reads.",
+    "Defaults applied: rust, tested, verified, behavior-evidence, small. The change is one commit with no refusal rule added, so no refusal-rate criterion applies."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-cli/src/drain.rs holds one list covering every ItemEnd variant, marking each as continues-the-batch or ends-the-run. The diff shows no wildcard arm in the match over it, and Drain::finish uses it or agrees with it.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-cli/tests/drain.rs has a test that fails to compile or fails at run time when an ItemEnd variant is missing from the list. The diff shows the exhaustive match.",
+      "kind": "content"
+    },
+    {
+      "text": "For each continuing state (paused, flagged, awaiting diagnosis, failed twice, held, needs-accepting, skipped, waiting), a test in crates/athena-cli/tests/drain.rs drives a first item into that state with the stub Steps. It asserts that the next runnable item ran and landed, and that the summary or ui output has one pass-over line with the job, the state and the reason. Verified by `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The drain continues only while budget and slots remain: a test shows that after a skipped item, a budget or job-limit stop still ends the run with its Stop reason. Verified by `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The new continue tests fail if the pass-over for that state is made to stop the run. The producer shows that the test asserts a later item landed, not just that a line was printed. Verified by reading the test diff and `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No unrelated behavior changes. The diff leaves the StopCause environment stop (Stop::Environment) and the existing tests unchanged apart from additions. CHANGELOG.md has an entry for the change.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy` and `cargo test` pass on the final tree, as recorded by Athena.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.93
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Sorting failures by cause, or any change to StopCause handling",
+    "Changes to athena.toml, defaults.toml or workflows",
+    "Edits to records/ or to existing entries in docs/decisions.md",
+    "The in-flight job that passes over an item that fails twice while flagged"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 6.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.684297520661157,
+      "p_user_intervenes": 0.06044444444444444,
+      "cost_usd": {
+        "p10": 0.5539561510829174,
+        "p50": 1.5350815319454534,
+        "p90": 6.439481603055482
+      },
+      "wall_time_s": {
+        "p10": 607.8917087625641,
+        "p50": 2198.6818760249994,
+        "p90": 4523.914409046081
+      }
+    }
+  },
+  "departures": "The drain.rs test file is large (over 6,000 lines) and the change needs many state-driving tests, so cost and time sit slightly above the reference.",
+  "urgent_reason": "It cuts wasted time from batches that stop on one failing item and are then fixed by hand.",
+  "hard_reason": "It changes the drain run pipeline and its stop and continue rules, so a mistake could hide a real stop or halt a batch.",
+  "producer_effort": "high"
+}

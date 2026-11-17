@@ -87,7 +87,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 63] = [
+const INPUT_FORMS: [&str; 77] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -151,6 +151,20 @@ const INPUT_FORMS: [&str; 63] = [
     "ci-drain-throughput",
     "ci-wait-time-spent",
     "record-types-module-no-measure",
+    "timing-claim-with-figure",
+    "timing-claim-stage-noun",
+    "timing-claim-inflected-form",
+    "timing-claim-reduce-verb",
+    "timing-claim-hyphen-spelling",
+    "timeline-assumption-satisfied",
+    "timeline-missing-parts",
+    "timing-claim-generated-root-cause-lines",
+    "refusal-rule-declaration-exempt",
+    "refusal-declaration-on-pipeline-change",
+    "docs-class-speed-claim",
+    "shorten-text-not-time",
+    "steward-slowdown-request",
+    "earlier-as-adjective",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -308,6 +322,7 @@ fn cases() -> Vec<Case> {
     out.extend(defined_terms_cases());
     out.extend(scope_limit_cases());
     out.extend(records_measure_cases());
+    out.extend(timing_claim_cases());
     out
 }
 
@@ -486,7 +501,9 @@ fn records_measure_cases() -> Vec<Case> {
         "Reduce time spent waiting for CI",
         &["- Run `cargo test -p athena-core land::`: a job does not wait for a green run twice"],
         &["crates/athena-core/src/land.rs"],
-        Expected::Accept,
+        // Not a records measure (`check_records_measure` does not refuse it), but a request to cut the time a
+        // stage takes: it is the speed class, so `check_timing_claim` asks for a timeline.
+        Expected::Refuse("check_timing_claim"),
     ));
     out.push(measure_case(
         "records-throughput-record-types-no-measure-word",
@@ -497,6 +514,289 @@ fn records_measure_cases() -> Vec<Case> {
         &["crates/athena-data/src/records/throughput.rs"],
         Expected::Accept,
     ));
+    out
+}
+
+/// A root-cause request built by `hestia::root_cause_request` for a cause whose class, cause and prevention
+/// text quote `speed-up`, `faster` and `12 minutes`: the words are in the lines Athena copied from earlier
+/// introspections only.
+fn generated_speed_root_cause_request() -> String {
+    let first = introspection(
+        10,
+        'a',
+        "Make the checks faster; a speed-up of the tests saves 12 minutes.",
+    );
+    let second = introspection(20, 'b', "Time each stage before a speed-up is planned.");
+    let cause = athena_core::hestia::RepeatedCause {
+        key: "cause:speed".into(),
+        class: Some("Speed-up planned from a figure (20261027-090500-1abc)".into()),
+        cause: "the request said the tests were 12 minutes slower and nothing checked it".into(),
+        introspections: vec![first.id.to_string(), second.id.to_string()],
+        jobs: vec![
+            cause_job('a').as_str().to_string(),
+            cause_job('b').as_str().to_string(),
+        ],
+        request: None,
+    };
+    let records = Records {
+        introspections: vec![first, second],
+        ..Records::default()
+    };
+    athena_core::hestia::root_cause_request(&cause, &records).unwrap()
+}
+
+/// The steward's slowdown request, built by `hestia::slowdown_request`: the producer stage grew from 25.0 to
+/// 45.0 minutes per landed job.
+fn generated_slowdown_request() -> String {
+    let growth = athena_core::hestia::StageGrowth {
+        stage: "producer",
+        previous_minutes: 25.0,
+        minutes: 45.0,
+    };
+    athena_core::hestia::slowdown_request(25.0, 60.0, &[growth]).unwrap()
+}
+
+/// Readings for a request that claims a delay or a speed-up (`check_timing_claim`). The refusing cases name a
+/// fix or a stage and a figure with no timeline of stage order and durations, as the three jobs of the class
+/// did (20261025-110525-8hzb moved a call earlier to save about 12 minutes; 20261025-034733-c453 and
+/// 20261025-190606-eebk sped up the tests). The accepting cases carry the timeline, or make no claim: an
+/// `earlier attempt`, a `delayer`, text to shorten, a docs reading, a root-cause request whose copied lines
+/// quote the words, and a reading that adds a reading check.
+fn timing_claim_cases() -> Vec<Case> {
+    const SOURCE_8HZB: &str = "job 20261025-110525-8hzb, a call moved earlier to save about 12 minutes; rebuilt from the job brief";
+    const SOURCE_CLASS: &str = "jobs 20261025-034733-c453 and 20261025-190606-eebk, a test speed-up with no stage timeline; rebuilt from the job briefs";
+    const SOURCE_OWN: &str =
+        "the shapes of the speed class; rebuilt from the introspection prevention text";
+    let survey =
+        "Code survey: read crates/athena-core/src/reading.rs, the gate every reading passes";
+    let timeline = "Timeline: crates/athena-core/src/run/mod.rs runs reading 3 min (recorded), then planning 9 min (recorded), then checks 6 min (estimate); the claimed 12 minute delay sits in checks";
+    let run = "crates/athena-core/src/run/mod.rs";
+    // A code reading whose first request bullet is the behavior criterion, with this summary and deliverables.
+    let timing_case = |id: &'static str,
+                       source: &'static str,
+                       forms: &'static [&'static str],
+                       summary: &str,
+                       bullets: &[&str],
+                       paths: &[&str],
+                       expected: Expected| {
+        let mut text = vec![summary];
+        text.extend_from_slice(bullets);
+        let mut c = case(id, source, forms, &lines(&text), bullets.len(), expected);
+        c.reading.summary = summary.into();
+        c.reading.class_of_work = "code".into();
+        c.reading.acceptance_criteria[0].kind = CriterionKind::Behavior;
+        c.reading.assumptions = vec![survey.into()];
+        c.reading.deliverables = paths
+            .iter()
+            .map(|p| deliverable(p, DeliverableAction::Modify))
+            .collect();
+        c.repo_files = None;
+        c
+    };
+    let refuse = || Expected::Refuse("check_timing_claim");
+    let move_summary = "Move the call earlier in the run to save about 12 minutes";
+    let move_bullet =
+        "- Run `cargo test -p athena-core run::`: the call is made before the checks start";
+    let mut out = vec![timing_case(
+        "timing-claim-call-earlier-12-minutes-no-timeline",
+        SOURCE_8HZB,
+        &["dash-bullet", "timing-claim-with-figure"],
+        move_summary,
+        &[move_bullet],
+        &[run],
+        refuse(),
+    )];
+    let mut c = timing_case(
+        "timing-claim-call-earlier-12-minutes-with-timeline",
+        SOURCE_8HZB,
+        &["dash-bullet", "timeline-assumption-satisfied"],
+        move_summary,
+        &[move_bullet],
+        &[run],
+        Expected::Accept,
+    );
+    c.reading.assumptions.push(timeline.into());
+    out.push(c);
+    let mut c = timing_case(
+        "timing-claim-timeline-without-durations",
+        SOURCE_8HZB,
+        &["dash-bullet", "timeline-missing-parts"],
+        move_summary,
+        &[move_bullet],
+        &[run],
+        refuse(),
+    );
+    c.reading
+        .assumptions
+        .push(format!("Timeline: {run} is the entry point of the run"));
+    out.push(c);
+    out.push(timing_case(
+        "timing-claim-speed-up-the-tests-star-bullet",
+        SOURCE_CLASS,
+        &["star-bullet", "timing-claim-stage-noun"],
+        "Change the test runner",
+        &["* Run `cargo test`: the test suite runs faster than before"],
+        &["crates/athena-core/src/run/checks.rs"],
+        refuse(),
+    ));
+    out.push(timing_case(
+        "timing-claim-reduce-ci-wait-numbered-part",
+        SOURCE_CLASS,
+        &["number-dot-parts", "timing-claim-reduce-verb"],
+        "Change how a job waits",
+        &[
+            "1. Run `cargo test -p athena-core land::`: the job does not wait twice",
+            "2. Reduce the CI wait from 10 minutes",
+        ],
+        &["crates/athena-core/src/land.rs"],
+        refuse(),
+    ));
+    out.push(timing_case(
+        "timing-claim-delayed-and-speeds-up",
+        SOURCE_OWN,
+        &["dash-bullet", "timing-claim-inflected-form"],
+        "Update the run order",
+        &["- Run `cargo test`: the checks are no longer delayed by 12 minutes, which speeds up the test suite"],
+        &[run],
+        refuse(),
+    ));
+    out.push(timing_case(
+        "timing-claim-hyphen-spelling-90s",
+        SOURCE_OWN,
+        &["dash-bullet", "timing-claim-hyphen-spelling"],
+        "Add a speed-up of 90s to the run",
+        &["- Run `cargo test`: the run is shorter"],
+        &[run],
+        refuse(),
+    ));
+    let mut c = timing_case(
+        "ci-wait-time-spent-with-timeline",
+        "a CI wait job with the timeline its reading must carry; rebuilt from the job brief",
+        &["dash-bullet", "timeline-assumption-satisfied"],
+        "Reduce time spent waiting for CI",
+        &["- Run `cargo test -p athena-core land::`: a job does not wait for a green run twice"],
+        &["crates/athena-core/src/land.rs"],
+        Expected::Accept,
+    );
+    c.reading.assumptions.push(timeline.into());
+    out.push(c);
+    out.push(timing_case(
+        "timing-claim-word-inside-delayer",
+        SOURCE_OWN,
+        &["dash-bullet", "trigger-word-inside-other-word"],
+        "Rename the delayer that runs for 12 minutes",
+        &["- Run `cargo test`: the delayer is renamed"],
+        &[run],
+        Expected::Accept,
+    ));
+    let mut c = case(
+        "timing-claim-docs-reading",
+        "a docs reading that describes a speed-up; rebuilt from the job brief",
+        &["dash-bullet", "docs-class-speed-claim"],
+        &lines(&[
+            "Describe how the tests were sped up.",
+            "- The guide says the tests are faster by 12 minutes",
+        ]),
+        1,
+        Expected::Accept,
+    );
+    c.reading.summary = "Describe the speed-up of the tests, 12 minutes faster".into();
+    out.push(c);
+    // A reading that adds a reading check quotes speed requests as test input and changes no pipeline stage.
+    let declared = "- Run `cargo test -p athena-core`: the check refuses `Move the call earlier to save about 12 minutes` with no timeline; expected 4% of newly refused readings";
+    out.push(timing_case(
+        "timing-claim-refusal-rule-declaration-exempt",
+        SOURCE_OWN,
+        &["dash-bullet", "refusal-rule-declaration-exempt"],
+        "Refuse a speed-up request that has no timeline",
+        &[declared],
+        &["crates/athena-core/src/reading/surveys.rs"],
+        Expected::Accept,
+    ));
+    out.push(timing_case(
+        "timing-claim-declaration-on-pipeline-change",
+        SOURCE_OWN,
+        &["dash-bullet", "refusal-declaration-on-pipeline-change"],
+        "Refuse a speed-up request that has no timeline",
+        &[declared],
+        &["crates/athena-core/src/gh.rs"],
+        refuse(),
+    ));
+    // A root-cause request built by the real generator: the words are in the copied lines only.
+    let mut c = timing_case(
+        "timing-claim-generated-root-cause-quotes-only",
+        "a root-cause request of Athena's own generator whose copied lines quote the speed words; built by hestia::root_cause_request",
+        &[
+            "dash-bullet",
+            "cites-job-without-relying",
+            "timing-claim-generated-root-cause-lines",
+        ],
+        "Fix the cause in the reading gate",
+        &[],
+        &["crates/athena-core/src/reading.rs"],
+        Expected::Accept,
+    );
+    c.request = generated_speed_root_cause_request();
+    c.bullets_expected = 3;
+    c.referenced = cause_jobs_referenced();
+    out.push(c);
+    out.push(timing_case(
+        "timing-claim-shorten-prompt-with-tests",
+        SOURCE_OWN,
+        &["dash-bullet", "shorten-text-not-time"],
+        "Shorten the reader prompt so the budget tests pass",
+        &["- Run `cargo test -p athena-cli --test budgets`: the budget tests pass"],
+        &["crates/athena-context/prompts/reader.md"],
+        Expected::Accept,
+    ));
+    // The steward's slowdown request, built by the real generator, and the same with the timeline.
+    let slowdown = generated_slowdown_request();
+    for (id, expected, timed) in [
+        ("timing-claim-steward-slowdown-request", refuse(), false),
+        (
+            "timing-claim-steward-slowdown-with-timeline",
+            Expected::Accept,
+            true,
+        ),
+    ] {
+        let mut c = timing_case(
+            id,
+            "the steward's slowdown request; built by hestia::slowdown_request",
+            &["dash-bullet", "steward-slowdown-request"],
+            "Find why the producer stage takes longer",
+            &[
+                "- Run `cargo test -p athena-core hestia::`: the cause of the longer stage is stated",
+            ],
+            &["crates/athena-core/src/hestia.rs"],
+            expected,
+        );
+        c.request = slowdown.clone();
+        c.bullets_expected = 2;
+        if timed {
+            c.reading.assumptions.push(
+                "Timeline: crates/athena-core/src/run/producer.rs runs reading 3 min (recorded), then producer 45 min (recorded), then checks 6 min (recorded); the claimed growth from 25 min to 45 min sits in producer"
+                    .into(),
+            );
+        }
+        out.push(c);
+    }
+    // A retry complaint that says `the earlier attempt ran 40 minutes`: `earlier` before a noun is no claim.
+    let mut c = timing_case(
+        "timing-claim-retry-earlier-attempt-figure",
+        "job 20261030-060751-5389 retried, with a figure for the earlier attempt; rebuilt from the job brief",
+        &["retry-complaint", "earlier-as-adjective"],
+        &format!(
+            "Retry of job {RETRIED_JOB}: the rule is re-planned with a corpus of real request shapes."
+        ),
+        &[],
+        &["crates/athena-core/src/reading.rs"],
+        Expected::Accept,
+    );
+    c.request = "The earlier attempt ran 40 minutes and was rejected: its rule was never run on a real request. Try again.".into();
+    c.bullets_expected = 0;
+    c.attempt = Some(earlier(RETRIED_JOB, "Check that a cited prior job exists"));
+    c.reading.out_of_scope = vec!["The reader and verifier prompts are not changed".into()];
+    out.push(c);
     out
 }
 
@@ -3203,6 +3503,102 @@ fn records_measure_refusal_is_declared_intended() {
         "split",
     ] {
         assert!(changelog.contains(needle), "the changelog lacks {needle:?}");
+    }
+}
+
+/// `text` with runs of white space made single spaces.
+fn collapsed(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn timing_claim_refusal_is_declared_intended() {
+    // The declared share is read from the criterion text by the replay.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The change refuses more readings: expected 4% of newly refused readings".into(),
+            kind: CriterionKind::Behavior,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(4));
+    // The step line is in refusing_check, and the doc comment names the cause, the limits and the estimate.
+    assert!(acceptance_check_names(reading_source()).contains(&"check_timing_claim".to_string()));
+    let doc = reading_source()
+        .split("pub fn check_timing_claim(")
+        .next()
+        .unwrap()
+        .lines()
+        .rev()
+        .take_while(|l| l.starts_with("///"))
+        .map(|l| l.trim_start_matches('/').trim())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "This check refuses more readings; the higher refusal rate is intended.",
+        "expected 4% of newly refused readings",
+        "estimate",
+        "Limits:",
+        "no reading of negation",
+        "figures written as words",
+        "throughput",
+        "earlier attempt",
+        "presence, not that its figures are true",
+        "20261025-110525-8hzb",
+        "20261025-034733-c453",
+        "20261025-190606-eebk",
+    ] {
+        assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+    }
+    // The doc's own declaration parses to the same share.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: doc.clone(),
+            kind: CriterionKind::Content,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(4));
+    // The change log and the decision log name the cause and the three jobs.
+    let cause = "nothing required a reading of a delay or speed-up request to check the claimed figure against \
+                 the real stage order and durations";
+    let jobs = [
+        "20261025-110525-8hzb",
+        "20261025-034733-c453",
+        "20261025-190606-eebk",
+    ];
+    let changelog = collapsed(include_str!("../../../CHANGELOG.md"));
+    for needle in [
+        "reading::check_timing_claim",
+        "higher refusal rate is intended",
+        "expected 4% of newly refused readings",
+        "`Timeline:`",
+        "Limits:",
+        "ci-wait-time-spent-reading",
+        cause,
+    ]
+    .into_iter()
+    .chain(jobs)
+    {
+        assert!(changelog.contains(needle), "the changelog lacks {needle:?}");
+    }
+    let decisions = collapsed(include_str!("../../../docs/decisions.md"));
+    let (_, entry) = decisions
+        .split_once("## D190 · ")
+        .expect("docs/decisions.md holds a D190 entry");
+    for needle in [
+        "- **Provenance:**",
+        "expected 4% of newly refused readings",
+        "`Timeline:`",
+        cause,
+    ]
+    .into_iter()
+    .chain(jobs)
+    {
+        assert!(entry.contains(needle), "D190 lacks {needle:?}");
     }
 }
 

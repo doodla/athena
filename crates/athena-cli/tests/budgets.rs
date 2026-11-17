@@ -393,6 +393,34 @@ fn every_role_set_is_within_its_budget() {
 }
 
 #[test]
+fn every_mode_line_is_in_the_reader_set_within_its_budget() {
+    // The every-mode default is composed into the real reader set, and the set still fits.
+    let defaults = defaults();
+    let cards: Vec<_> = athena_cli::wiring::capabilities()
+        .iter()
+        .map(|c| c.card())
+        .collect();
+    let reader = compose(&[
+        CONTRACT.into(),
+        READER_FRAME.into(),
+        Component::new("defaults", defaults.version, defaults.render()),
+        Component::new("catalog", 1, render_catalog(&cards)),
+    ]);
+    assert!(
+        reader.text.contains(
+            "- every-mode [code, tests, config, build]: Every behavior criterion for a multi-mode flow needs one demonstration per shipped mode, with expected values.\n"
+        ),
+        "the every-mode line is missing from the reader set"
+    );
+    assert!(
+        reader
+            .text
+            .contains("record each applicable one as an acceptance criterion")
+    );
+    assert!(check_budget(BudgetSet::Reader, &reader).is_ok());
+}
+
+#[test]
 fn the_reader_headroom_rows_equal_the_budget_figures_and_name_shared_files() {
     // The rows the reader's brief shows come from the same compose and budgets as `computed_rows`.
     let defaults = defaults();

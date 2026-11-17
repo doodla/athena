@@ -1,0 +1,163 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261104-211248-rgdn",
+  "n": 1,
+  "at": "2026-11-16T11:56:51.778589967Z",
+  "invocation_seq": 1,
+  "base_commit": "e0635520ea8938437e9f9ca01b8c06cdffdec0a0",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Check athena.toml cap sums at reading time; fixture job_usd in tests",
+  "summary": "Add a reading-time check: a reading or plan that touches [budget] or agent cap fields in athena.toml is refused when the proposed caps need more than job_usd, and the refusal names the minimum job_usd. Replace the live-athena.toml job_usd dependence in tests in admission.rs, run_pin_tests.rs, reading.rs and config.rs with their own fixture config. Then raising job_usd alone passes the suite. The audience is Athena operators landing cap changes.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests for the refusal and acceptance paths; fmt, clippy and test are criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The refusal criterion runs the real acceptance path and checks the named required job_usd."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced in code in the reading-acceptance chain, not in prose."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix covers both failure causes: the missing reading-time check and the tests pinned to live config."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-data/src/config.rs (Config::budget_required at ~936 sums reader_usd + planning_usd(max_rounds) + producer_usd + verifier_usd; Config::check_budget at ~948 returns ConfigError::BudgetBelowReserve with the required figure; tests at ~1006-1152 and REPO_CONFIG include_str of athena.toml), crates/athena-core/src/admission.rs (admit_without_secrets ~930-958 already runs check_budget on the candidate athena.toml after production; test a_job_usd_below_the_stage_caps_is_a_configuration_violation ~2018 replaces 'job_usd = 50.00' in BASE_CONFIG), crates/athena-core/src/reading.rs (budget_reserve ~128, check_budget/preflight ~480-515, tests shipped_budget_covers_the_reserve ~1658 and required_budget_follows_the_configured_caps ~1733 using the live config; check_reading_acceptance holds the reading-rule chain), crates/athena-core/src/run_pin_tests.rs (config() includes ../../../athena.toml; lines ~974, 1001, 1032 replace 'job_usd = 50.00'). The new check belongs in the reading-acceptance chain in reading.rs, calling Config::budget_required on a config with the proposed values. No record or data file is added, so check_record_file/AnyRecord are unaffected.",
+    "Field meaning: [budget] job_usd is documented at reading.rs:158 as 'The job's whole budget, [budget] job_usd'; config: live athena.toml line 47 job_usd = 50.00. Cap fields are reader_usd, producer_usd, verifier_usd, planner_usd, critic_usd and [job_plan] max_rounds. No new config key is added.",
+    "The reading-time check applies only to readings whose deliverables or text name athena.toml and a cap field. It parses the proposed values from the reading (or the plan's text) and overlays them on the base Config. Where the proposed values cannot be recovered, it falls back to the existing admission check and does not refuse.",
+    "Test fixtures: each of the four files gets its own const fixture config text (a copy of the needed [budget] and [job_plan] tables) in place of include_str!('../../../athena.toml') wherever a test asserts or replaces job_usd. Tests that deliberately check the shipped athena.toml parses may keep REPO_CONFIG but must not assert a job_usd value.",
+    "Consumers: athena.toml is read by athena-data Config::parse, athena-core admission and reading, and the cli. Whether athena.toml needs a change: none is expected, because the fix is in code and tests. It is listed at a low probability only in case the producer needs to raise job_usd to demonstrate the criterion.",
+    "Expected refusal rate: the new rule refuses only readings that touch cap fields with a sum above job_usd, expected 1% of newly refused readings.",
+    "Files named in the request are admission.rs, run_pin_tests.rs, reading.rs and config.rs, under crates/athena-core/src and crates/athena-data/src. CHANGELOG.md is a default-written deliverable."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new unit test in crates/athena-core/src/reading.rs builds a reading that touches athena.toml with proposed caps whose sum exceeds job_usd. It asserts that check_reading_acceptance refuses the reading before dispatch and that the message names the required minimum job_usd, as a '$N.NN' figure equal to Config::budget_required of the proposed values. Run cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A companion test shows a reading that proposes caps within job_usd is accepted, and a reading that does not touch athena.toml is unaffected. Run cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "After editing only job_usd in athena.toml, for example 50.00 to 60.00, cargo test passes in full. Check by running cargo test with that single-line change and confirming no test asserts the live job_usd value.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A Grep for include_str of athena.toml and for 'job_usd = 50.00' in crates/athena-core/src/admission.rs, run_pin_tests.rs, reading.rs and crates/athena-data/src/config.rs shows the job_usd-dependent tests use a local fixture config, with no remaining dependence on the live job_usd value.",
+      "kind": "content"
+    },
+    {
+      "text": "The reading-time check reuses Config::budget_required / check_budget in crates/athena-data/src/config.rs; it does not re-derive the sum. The existing admission check in admission.rs is unchanged in behavior.",
+      "kind": "content"
+    },
+    {
+      "text": "No unrelated behavior changes: the existing tests pass. The recorded cargo fmt --check, cargo clippy and cargo test results on the final tree all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md records the change. Any behavior change to the reading rules is noted there; docs/decisions.md is touched only by a new appended decision with a Provenance bullet, if one is added.",
+      "kind": "content"
+    },
+    {
+      "text": "The change refuses more readings by design: expected 1% of newly refused readings.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Changing job_usd or any cap value in athena.toml as a goal of this job",
+    "Tests in other files that read the live config, such as crates/athena-cli/tests and run/tests.rs, beyond what the full suite needs",
+    "Changing the existing candidate-time admission check semantics",
+    "Edits to existing entries in docs/decisions.md or records/"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 1.5,
+        "p50": 3.5,
+        "p90": 8.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2700.0,
+        "p90": 6000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.684297520661157,
+      "p_user_intervenes": 0.06044444444444444,
+      "cost_usd": {
+        "p10": 0.5539561510829174,
+        "p50": 1.5350815319454534,
+        "p90": 6.439481603055482
+      },
+      "wall_time_s": {
+        "p10": 607.8917087625641,
+        "p50": 2198.6818760249994,
+        "p90": 4523.914409046081
+      }
+    }
+  },
+  "departures": "The job touches four large files and adds a new refusal rule, and the job is hard so it gets a planner and critic. I expect cost and time above the reference and a lower verification pass rate.",
+  "urgent_reason": "Cuts redo-work: cap changes failed twice, once at admission and once from tests pinning job_usd.",
+  "hard_reason": "Adds a new refusal rule at reading and plan time (a gate that can refuse or hold work) and changes admission checks.",
+  "producer_effort": "high"
+}

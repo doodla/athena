@@ -601,6 +601,411 @@ pub fn check_records_measure(reading: &Reading) -> Result<()> {
     )
 }
 
+/// Phrases that claim a job, check or stage is slow or must go faster. Each is matched on whole words of
+/// lowercase text in which a hyphen, an underscore and any other mark read as a word break, so `speed-up`
+/// matches `speed up`. Inflected forms are listed one by one, since whole-word matching does not
+/// stem. A speed phrase fires with a duration figure or with a stage noun.
+const TIMING_SPEED: &[&str] = &[
+    "speed up",
+    "speeds up",
+    "sped up",
+    "speeding up",
+    "speedup",
+    "faster",
+    "quicker",
+    "slower",
+    "too slow",
+    "slow down",
+    "slows",
+    "slowed",
+    "slowing",
+    "slowdown",
+    "takes longer",
+    "take longer",
+    "taking longer",
+    "took longer",
+];
+
+/// Words that claim a delay or a saving. They fire only with a duration figure: `delay` also names code
+/// behavior, and `earlier` is ordinary prose before a noun (see [`TIMING_EARLIER_FOLLOWERS`]).
+const TIMING_DELAY: &[&str] = &["slow", "delay", "delays", "delayed", "delaying", "sooner"];
+
+/// What may follow `earlier` when it is an adverb (`move the call earlier in the run`, `earlier to save`):
+/// the end of the sentence, or one of these words. Before any other word it is an adjective of a noun
+/// (`the earlier attempt`, `the earlier text`), not a claim that a call moves earlier in a run. The list is
+/// the positive one, because real requests put many nouns after `earlier`.
+const TIMING_EARLIER_FOLLOWERS: &[&str] = &[
+    "to", "so", "by", "than", "in", "on", "at", "and", "or", "but", "before", "with", "for",
+    "when", "if", "then", "as", "from",
+];
+
+/// Verbs that cut a duration. With a duration figure they fire; with a time word and a stage noun they fire.
+/// `shorten` is only ever a cut verb here, so `Shorten the reader prompt so the budget tests pass` (no time
+/// word, no figure) is not a claim.
+const TIMING_CUT: &[&str] = &[
+    "reduce",
+    "reduces",
+    "reduced",
+    "reducing",
+    "cut",
+    "cuts",
+    "cutting",
+    "save",
+    "saves",
+    "saved",
+    "saving",
+    "shave",
+    "shaves",
+    "shaved",
+    "shaving",
+    "shorten",
+    "shortens",
+    "shortened",
+    "shortening",
+];
+
+/// Words for the time a thing takes.
+const TIMING_TIME: &[&str] = &[
+    "time",
+    "times",
+    "wait",
+    "waits",
+    "waiting",
+    "duration",
+    "durations",
+    "latency",
+    "runtime",
+];
+
+/// Nouns for the stages and gates of a pipeline.
+const TIMING_STAGE: &[&str] = &[
+    "pipeline",
+    "pipelines",
+    "test suite",
+    "test",
+    "tests",
+    "ci",
+    "check",
+    "checks",
+    "compile",
+    "compilation",
+    "build",
+    "builds",
+    "stage",
+    "stages",
+    "planning",
+    "reading",
+    "producer",
+    "verifier",
+    "landing",
+];
+
+/// Units of a duration figure, as written after a number (`12 minutes`, `90s`, `500ms`).
+const TIMING_UNITS: &[&str] = &[
+    "s",
+    "sec",
+    "secs",
+    "second",
+    "seconds",
+    "ms",
+    "millisecond",
+    "milliseconds",
+    "min",
+    "mins",
+    "minute",
+    "minutes",
+    "h",
+    "hr",
+    "hrs",
+    "hour",
+    "hours",
+];
+
+/// `text` in lowercase with its white-space tokens that hold a `/` (paths) left out, so a directory named
+/// `tests` is not a stage noun.
+fn timing_plain(text: &str) -> String {
+    straight_lowercase(text)
+        .split(' ')
+        .filter(|token| !token.contains('/'))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The words of `plain` ([`timing_plain`]) for the timing phrases: split at every character that is not a
+/// letter or a digit.
+fn timing_words(plain: &str) -> Vec<String> {
+    plain
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether the words hold `phrase` (one or more words separated by single spaces) as consecutive words.
+fn words_hold(words: &[String], phrase: &str) -> bool {
+    let parts: Vec<&str> = phrase.split(' ').collect();
+    words
+        .windows(parts.len())
+        .any(|w| w.iter().zip(&parts).all(|(a, b)| a == b))
+}
+
+/// The first phrase of `list` that the words hold.
+fn first_held(words: &[String], list: &[&'static str]) -> Option<&'static str> {
+    list.iter()
+        .copied()
+        .find(|phrase| words_hold(words, phrase))
+}
+
+/// How many duration figures `text` holds: a number (a decimal counts as one), then a unit of
+/// [`TIMING_UNITS`] after optional spaces or one hyphen, as a whole word. A number inside a word (`sha256`,
+/// `a1`) is not a figure.
+fn duration_figures(text: &str) -> usize {
+    let chars: Vec<char> = straight_lowercase(text).chars().collect();
+    let mut count = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].is_ascii_digit()
+            || (i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_'))
+        {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < chars.len()
+            && (chars[j].is_ascii_digit()
+                || (chars[j] == '.' && chars.get(j + 1).is_some_and(char::is_ascii_digit)))
+        {
+            j += 1;
+        }
+        let mut k = j;
+        while chars.get(k) == Some(&' ') {
+            k += 1;
+        }
+        if k == j && chars.get(k) == Some(&'-') {
+            k += 1;
+        }
+        let unit: String = chars[k..]
+            .iter()
+            .take_while(|c| c.is_alphabetic())
+            .collect();
+        if TIMING_UNITS.contains(&unit.as_str()) {
+            count += 1;
+        }
+        i = j.max(i + 1);
+    }
+    count
+}
+
+/// What a timing claim rests on in one sentence, if the sentence makes one: three rules. (1) A speed, delay or
+/// cut phrase and a duration figure. (2) A speed phrase and a stage noun. (3) A cut verb, a time word and a
+/// stage noun. The returned text names the rule and the phrase.
+fn timing_claim_in(sentence: &str) -> Option<String> {
+    let plain = timing_plain(sentence);
+    let words = timing_words(&plain);
+    let figures = duration_figures(&plain);
+    let speed = first_held(&words, TIMING_SPEED);
+    let earlier = words.iter().enumerate().find_map(|(i, w)| {
+        (w == "earlier"
+            && words
+                .get(i + 1)
+                .is_none_or(|next| TIMING_EARLIER_FOLLOWERS.contains(&next.as_str())))
+        .then_some("earlier")
+    });
+    let delay = first_held(&words, TIMING_DELAY).or(earlier);
+    let cut = first_held(&words, TIMING_CUT);
+    let time = first_held(&words, TIMING_TIME);
+    let stage = first_held(&words, TIMING_STAGE);
+    if figures > 0
+        && let Some(phrase) = speed.or(delay).or(cut)
+    {
+        return Some(format!("the phrase \"{phrase}\" and a duration figure"));
+    }
+    if let (Some(phrase), Some(stage)) = (speed, stage) {
+        return Some(format!(
+            "the phrase \"{phrase}\" and the stage noun \"{stage}\""
+        ));
+    }
+    if let (Some(phrase), Some(time), Some(stage)) = (cut, time, stage) {
+        return Some(format!(
+            "the cut verb \"{phrase}\", the time word \"{time}\" and the stage noun \"{stage}\""
+        ));
+    }
+    None
+}
+
+/// Whether the reading adds or changes a reading check: a criterion declares `newly refused` readings and a
+/// deliverable that is not deleted is a file of the reading module or its refusal corpus. Such a reading
+/// describes speed requests as test input and does not change a pipeline stage. A declaration alone is not
+/// enough, so a pipeline change cannot skip the check by carrying one.
+fn changes_a_reading_check(reading: &Reading) -> bool {
+    reading
+        .acceptance_criteria
+        .iter()
+        .any(|c| straight_lowercase(&c.text).contains("newly refused"))
+        && reading.deliverables.iter().any(|d| {
+            d.action != DeliverableAction::Delete
+                && (d.path.starts_with("crates/athena-core/src/reading")
+                    || d.path == "crates/athena-core/tests/refusal_corpus.rs")
+        })
+}
+
+/// Where the reading or its request claims a speed-up or a delay, if it does: the first sentence of the
+/// request (without the lines Athena's root-cause generator copied from earlier records), the summary or a
+/// criterion that [`timing_claim_in`] reads as a claim, as text for the error.
+fn timing_claim_trigger(reading: &Reading, request: &str) -> Option<String> {
+    let root_cause = request.contains(ROOT_CAUSE_ANCHOR);
+    let mut texts: Vec<(String, &str)> = request
+        .lines()
+        .filter(|line| !is_generated_line(line, root_cause, false))
+        .map(|line| ("request".to_string(), line))
+        .collect();
+    texts.push(("summary".into(), reading.summary.as_str()));
+    for (i, c) in reading.acceptance_criteria.iter().enumerate() {
+        texts.push((format!("criterion {}", i + 1), c.text.as_str()));
+    }
+    for (origin, text) in texts {
+        for sentence in sentences(text) {
+            if let Some(rule) = timing_claim_in(sentence) {
+                let excerpt: String = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
+                let excerpt: String = excerpt.chars().take(100).collect();
+                return Some(format!("the {origin} says {excerpt:?}, which holds {rule}"));
+            }
+        }
+    }
+    None
+}
+
+/// The `Timeline:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
+fn timelines(reading: &Reading) -> Vec<&str> {
+    reading
+        .assumptions
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| a.to_lowercase().starts_with("timeline:"))
+        .collect()
+}
+
+/// The five parts a `Timeline:` assumption must hold, each judged on its words: a `crates/` path, two or more
+/// duration figures, a marker of the stage order, a source label for the durations and a claim word.
+fn timeline_parts(text: &str) -> [bool; 5] {
+    let lower = straight_lowercase(text);
+    let holds = |list: &[&str]| list.iter().any(|p| has_phrase(&lower, p));
+    [
+        names_crates_path(text),
+        duration_figures(text) >= 2,
+        ["->", "\u{2192}", "=>"].iter().any(|a| lower.contains(a))
+            || holds(&["then", "before", "after", "followed by"]),
+        holds(&["measured", "recorded", "estimate", "estimated"]),
+        holds(&["claimed", "claim"]),
+    ]
+}
+
+/// An example `Timeline:` assumption that passes [`check_timing_claim`]. Every path in it is a file of the
+/// repository, since the reading's references are checked against the snapshot.
+pub(super) const TIMELINE_EXAMPLE: &str = "Timeline: crates/athena-core/src/run/mod.rs runs reading 3 min (recorded), then \
+     planning 9 min (recorded), then producer 14 min (recorded), then checks 6 min (recorded), then verifier \
+     8 min (estimate); the claimed 12 minute delay sits in checks";
+
+/// Refuses a code or tests reading, for a request that claims a delay or a speed-up, that has no `Timeline:`
+/// assumption holding the real stage order and durations.
+///
+/// Root cause this check removes: nothing required the reading of a delay or speed-up request to check the
+/// claimed figure against the real stage order and durations before planning around it. A request named a
+/// fix (move a call earlier) and a timing figure, and neither the reader nor the planner was required to
+/// compare that figure with the stages and their measured durations. Jobs 20261025-110525-8hzb,
+/// 20261025-034733-c453 and 20261025-190606-eebk each began that way, and introspections
+/// 20261025-110857-eqhd, 20261025-183009-xw7y and 20261025-190659-jvd7 each proposed a timeline of stages
+/// and durations before the method is fixed. The rule sits where readings are accepted, for any request of
+/// the class, not for those three jobs. The reader has no records, so the refusal text carries what it
+/// lacks: the six stages in pipeline order, where the measured medians are printed, and an example.
+///
+/// It reads the reading and the request only: no model call, no repository, no records and no network. It
+/// applies under the gate of [`check_code_survey`] (a capability, no question, class `code` or `tests`, a
+/// behavior criterion). It fires when the request (without the lines Athena's root-cause request copies from
+/// earlier records), the summary or a criterion holds, in one sentence, (1) a speed, delay or cut phrase
+/// (`speed up`, `faster`, `delayed`, `earlier`, `reduce`, `save`) and a duration figure (`12 minutes`, `90s`),
+/// or (2) a speed phrase and a stage noun (`speeds up the tests`), or (3) a cut verb, a time word and a stage
+/// noun (`reduce time spent waiting for CI`). A reading that adds or changes a reading check (a criterion
+/// declares `newly refused` readings, and a deliverable under `crates/athena-core/src/reading` or the refusal
+/// corpus) is exempt, since it quotes such requests as test input; a declaration beside a pipeline file does
+/// not exempt it.
+///
+/// The reading is accepted when one `Timeline:` assumption holds five parts: a `crates/` path, two or more
+/// duration figures, a marker of the stage order (`then`, `before`, `after`, `followed by` or an arrow), a
+/// source label (`measured`, `recorded`, `estimate`) and the claimed figure (the word `claimed`). The error
+/// names the trigger and the parts missing from the nearest assumption.
+///
+/// Limits: the check is lexical, with no reading of negation, so a reading that says a stage is not slower is
+/// still asked for the timeline. Also, figures written as words (`a minute`) are not read, so a request with
+/// no figure and no stage noun is missed. `earlier`, `delay` and `slow` need a figure, and `earlier` before a
+/// noun, as in `earlier attempt` or `earlier job`, is not a trigger. `throughput` and capacity requests are not read. A
+/// timeline proves presence, not that its figures are true: an `estimate` label passes, and the planner and
+/// the verifier judge the figures. The exemption is bounded to reading-check deliverables.
+///
+/// This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings
+/// (`replay`) holds a job that newly refuses more than 10% unless the job's criteria declare a share. Declared
+/// here: expected 4% of newly refused readings. That is an estimate, not measured: 3 of about 1000 scored
+/// jobs recorded this failure class, about 2 of the last 200 commit subjects name a speed topic and neither is
+/// a timing claim, and the replay at verification measures the real share. Stored readings of queued requests
+/// that claim a speed-up and lack the timeline leave the drain queue until they are read again, as for any
+/// failing check.
+///
+/// The error names the trigger and what the `Timeline:` assumption lacks, lists the stages in pipeline order,
+/// says where `athena status` prints their medians, and gives an example.
+pub fn check_timing_claim(reading: &Reading, request: &str) -> Result<()> {
+    if !changes_code_with_behavior_criterion(reading) || changes_a_reading_check(reading) {
+        return Ok(());
+    }
+    let Some(trigger) = timing_claim_trigger(reading, request) else {
+        return Ok(());
+    };
+    let timelines = timelines(reading);
+    let best = timelines
+        .iter()
+        .map(|t| timeline_parts(t))
+        .max_by_key(|p| p.iter().filter(|held| **held).count());
+    let best = match best {
+        Some(parts) if parts.iter().all(|held| *held) => return Ok(()),
+        other => other,
+    };
+    let lacks = match best {
+        None => "has no `Timeline:` assumption".to_string(),
+        Some(parts) => {
+            const PART_NAMES: [&str; 5] = [
+                "a crates/ path of the code that runs the stages",
+                "two or more durations, each with a unit such as `3 min`",
+                "the order of the stages (`then`, `before`, `after`, `followed by` or an arrow)",
+                "where the durations come from (`measured`, `recorded` or `estimate`)",
+                "the claimed figure (the word `claimed`) and the stage where it sits",
+            ];
+            let missing: Vec<&str> = parts
+                .iter()
+                .zip(PART_NAMES)
+                .filter(|(held, _)| !**held)
+                .map(|(_, name)| name)
+                .collect();
+            format!(
+                "has a `Timeline:` assumption that lacks {}",
+                missing.join("; ")
+            )
+        }
+    };
+    bail!(
+        "the reading was refused because the request or reading claims a delay or a speed-up ({trigger}) but \
+         it {lacks}; the claimed figure was not checked against the real stage order and durations. The \
+         stages of a job run in this order (as `StageMinutes::named` lists them): reading, planning, \
+         producer, checks, verifier, landing and rebuild. `athena status` prints the median minutes of each \
+         per landed job; a reader with no records takes the durations from the request, or from the timeouts \
+         and poll intervals in the code it reads. Add an assumption that starts `Timeline:`, names the \
+         crates/ path that runs the stages, lists each stage in order with its duration and whether it is \
+         measured, recorded or an estimate, and names the stage where the claimed delay sits. Say whether the \
+         request's own figure matches those durations, or label it an `unchecked estimate`; a stage the \
+         request names that the code does not run in that order is the usual error, for example: \
+         \"{TIMELINE_EXAMPLE}\". Plan the change around the stage where the time is spent, not around the \
+         figure as the request gave it"
+    )
+}
+
 /// The `Environment:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
 pub(super) fn environment_assumptions(reading: &Reading) -> Vec<&str> {
     reading

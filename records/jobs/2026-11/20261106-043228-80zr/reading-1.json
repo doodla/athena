@@ -1,0 +1,144 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-043228-80zr",
+  "n": 1,
+  "at": "2026-11-16T14:26:23.510296035Z",
+  "invocation_seq": 2,
+  "base_commit": "26c7ac32b4c0f4c3a37e81d454360fa0fcf542bc",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make the xtask repin test and the drain pid-file test deterministic",
+  "summary": "Find why xtask tests::repin_sets_only_the_version_and_is_idempotent (job 20261106-022423-vdtn) and athena-cli drain::tests::status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain (job 20261106-012852-h7de, test added by 20261105-205932-ppfv) fail intermittently under the parallel test binary, fix each root cause without removing coverage, and name both causes in CHANGELOG.md. Audience: the person running Athena, whose unrelated jobs are rejected by these flakes.",
+  "class_of_work": "tests",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the tests passing under the real parallel binary, not that helper code exists."
+    },
+    {
+      "id": "root-cause",
+      "how": "The producer must reproduce and name the observed cause of each flake, not only retry or sleep longer."
+    },
+    {
+      "id": "tested",
+      "how": "fmt, clippy and test criteria included."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read xtask/src/main.rs (tests at 855+, stand_in_claude, repin_at at 726, found at 168, retry_busy at 146-166), crates/athena-testkit/src/lib.rs (write_executable: writes via a child sh to path.writing, chmod, mv), crates/athena-agent/src/procs.rs (retry_busy, 20 retries x 50 ms, ETXTBSY only) and crates/athena-cli/src/drain.rs (test helpers stand_in_drain 5460, sleeper 5376, settled 5411, quick 5400, ReleaseAfterFirstLookup 5477, the test at 5524). The change adds no record or data file under crates/, so check_record_file and AnyRecord are not touched; no refusal rule is added or tightened.",
+    "Finding on the user's guess: ETXTBSY is already partly mitigated. write_executable renames a finished file into place and found() retries ETXTBSY for about 1 s. But found() collapses every failure (ETXTBSY after the retries are spent, any other spawn error, a non-zero exit) into None, so the message '<tmp>/claude --version failed' hides the real cause. The producer must reproduce the flake first (loop the full xtask test binary 200 times with --test-threads high and a CPU or fork load, capturing the underlying io error) and name the cause that was observed. If ETXTBSY is not the observed cause, the CHANGELOG names the one that was. A guess is not a root cause.",
+    "For the drain test the likely causes to check are: the test spawns real sleep and sh processes and reads their start marker, with fixed timing (settled waits 10 s, quick(20 s)); a decoy or stand-in that exits or is reaped early; stat-based start marker reads racing process start; sh -c polling with sleep 0.05 under load; and ppid or pid reuse against other tests that also spawn. The producer reproduces under the same loop and fixes the observed cause, for example by waiting on an explicit readiness signal instead of a time.",
+    "Previous results. Job 20261106-022423-vdtn (rejected, check test failed on the xtask repin test; the ceiling raise 8 to 16 itself met every criterion): its finding 'xtask test failed on a path the diff did not touch' is addressed by fixing that test here. Its other finding (CHANGELOG filed under Added not Changed) belongs to the ceiling change, which is a separate retry. Its six changed files (CHANGELOG.md, athena.toml, crates/athena-data/src/config.rs, the three design docs) are dropped from this job, not kept. Job 20261106-012852-h7de (rejected): its flaky drain test failure is addressed here; its major group_sizes findings and the ten changed files are dropped and belong to the separate retry of 20261105-180339-w5h7. Job 20261105-205932-ppfv (landed): its work is kept as landed; only its test in drain.rs is made deterministic, and its drain-status, drain-stop and drain-restart behavior is not changed.",
+    "Environment: the flakes were seen in CI (GitHub Actions running `cargo test --locked`, sharded by `xtask test-shard`), which the job cannot read or write. The producer works only locally with read/write access to the working copy. No CI workflow, athena.toml or defaults.toml change is needed; if the cause turns out to need one, the producer reports it rather than editing.",
+    "Measuring the 200 runs: the loop is the full test binary of each crate (cargo test -p xtask --bin xtask and cargo test -p athena-cli --lib), run 200 times in a row with the default parallel threads, filtered to its test name in the pass count, plus the same under added CPU load. The CHANGELOG states the exact command, thread count and load used, and the observed failure rate before and after, labeled as measured on the producer's machine. The verifier cannot run 200 loops and does not rely on a producer report; it checks the CHANGELOG text and runs each crate's tests once.",
+    "Out of scope: the 8 to 16 ceiling and the group_sizes record (separate retries), the xtask test-shard 'did not finish' symptom beyond what these two fixes explain, other tests, and any change to drain behavior, athena.toml, defaults.toml or workflow files."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "CHANGELOG.md has a new entry (a Fixed or Changed section, per the file's existing style) that names the measured root cause of each flake: for xtask repin_sets_only_the_version_and_is_idempotent and for the drain pid-file test. Each cause is specific (the syscall, race or timing assumption), not 'flaky'. Check with Grep for both test names in CHANGELOG.md.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md states how the 200-run check was measured: the exact command, the test-thread count, any added load, and the before and after failure counts. Check by reading the entry; a number without a command fails this criterion.",
+      "kind": "content"
+    },
+    {
+      "text": "No coverage is removed: `git diff` shows no deleted #[test] function, and Grep still finds repin_sets_only_the_version_and_is_idempotent in xtask/src/main.rs and status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain in crates/athena-cli/src/drain.rs, with every assertion of the latter still present (the decoy untouched, the pid in status, Exited after the wait, the Dead state).",
+      "kind": "content"
+    },
+    {
+      "text": "The xtask failure is no longer opaque: the diff makes repin_at or found report the underlying io error or exit status rather than only 'claude --version failed', or removes the source of the failure, and a test or the test body covers it. Check by reading the diff in xtask/src/main.rs.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p xtask --bin xtask` and `cargo test -p athena-cli --lib` as separate commands; both pass, including each named test, which runs in the parallel binary with default threads.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test` as separate commands; all pass, or a passing Athena-recorded check on the same final tree is cited (D115).",
+      "kind": "behavior"
+    },
+    {
+      "text": "No unrelated behavior changes: `git diff --stat` lists only the deliverables; production code of drain.rs and xtask (outside test modules and any minimal error-reporting change in found/repin_at) is unchanged; athena.toml, defaults.toml, workflows and records/ are untouched.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-testkit/src/lib.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-agent/src/procs.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 1.0
+    }
+  ],
+  "out_of_scope": [
+    "The agent ceiling raise from 8 to 16 and its files (athena.toml, crates/athena-data/src/config.rs, docs/design/async-drain.md, docs/design/parallel-jobs.md, docs/design/agent-and-build-slots.md): work of 20261106-022423-vdtn is dropped and retried separately",
+    "Recording plan group sizes and the files of 20261106-012852-h7de (display.rs, tests/drain.rs, plan.rs, main.rs help text): dropped, belongs to the retry of 20261105-180339-w5h7",
+    "Behavior of athena drain, drain-status, drain-stop and drain-restart from 20261105-205932-ppfv: kept as landed",
+    "Changes to athena.toml, defaults.toml, .github/workflows, setup.sh or records/",
+    "Other tests and the xtask test-shard timeout beyond what these two fixes explain"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.2,
+        "p90": 6.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2700.0,
+        "p90": 6000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7375,
+      "p_verification_passes": 0.4857142857142857,
+      "p_user_intervenes": 0.07777777777777778,
+      "cost_usd": {
+        "p10": 0.4477397958348601,
+        "p50": 1.0882284601020598,
+        "p90": 2.6240189157687785
+      },
+      "wall_time_s": {
+        "p10": 929.9795081320002,
+        "p50": 1637.2628539719997,
+        "p90": 4112.0054601369975
+      }
+    }
+  },
+  "departures": "Higher cost and time than reference: the producer must reproduce intermittent failures in repeated 200-run loops before fixing; verification passing is lower because a flake fix cannot be fully proven in one run.",
+  "urgent_reason": "Two flaky tests have rejected jobs whose agent verdict was pass (the ceiling change three times), so removing them cuts failed attempts and redo-work retries."
+}

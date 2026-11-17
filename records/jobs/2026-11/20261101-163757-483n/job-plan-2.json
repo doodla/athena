@@ -1,0 +1,444 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261101-163757-483n",
+  "round": 2,
+  "at": "2026-11-16T04:50:35.887639612Z",
+  "invocation_seq": 6,
+  "approach": "Add a login probe to the agent driver and call it at three gates in `crates/athena-core/src/run/mod.rs`: at dispatch, before the producer, and before the verifier. The trait method is `AgentDriver::login(&self, env, within) -> LoginCheck`, with a default of `Valid`. `FakeAgentDriver` and every existing test are unchanged. `ClaudeCodeDriver` runs `claude auth status` (the no-model-call check setup already uses: xtask/src/main.rs:788-806; docs/design/athena-v0.md E20) with exactly the environment it is handed. It reports `Lapses` only on a positive reading: `loggedIn:false`, or an `expiresAt` inside the look-ahead. Anything it cannot read counts as `Valid`. Round-2 change for the major finding: `Athena::login_gate` (disk.rs) builds that environment with `athena_agent::env::build` from the job's own `jc.config.agents` and the capability env, the way `agent_spec` does (reading.rs:438-449). The fixed variable list, `AUTH_ENV` and the `include_str!` of Athena's own athena.toml are gone. A hold is a typed `LoginHold` whose Display starts with its text. Dispatch holds as `dispatch_disk_gate` does (nothing committed, job stays Proposed). The pre-producer and pre-verifier gates hold through `hold_for_login`, built on `commit_hold` like `hold_for_disk`: no candidate and no resume mark are created and the producer never starts. The drain treats a `LoginHold` as held and ends the batch with `Stop::Environment`. The 401 retry in claude.rs is untouched. D190 and the CHANGELOG say what `agent stage` means here (first planner call, first producer call, first verifier call) and that the expiry half rests on a field nobody has seen the real binary print.",
+  "decisions": [
+    {
+      "choice": "Three files outside the reading's deliverable list stay: crates/athena-agent/src/lib.rs, crates/athena-cli/src/wiring.rs, crates/athena-core/src/run/close.rs. Each edit is additive and small. (Answers findings 1, 2 and 3.)",
+      "reason": "The accepted reading puts the check on the agent driver so a stub can return expired, valid or expiring-soon. (1) `AgentDriver` is defined only at crates/athena-agent/src/lib.rs:145, so a driver-level check needs a method there (about 15 lines: `LoginCheck` and a default method). `Athena.driver` is `Arc<dyn AgentDriver>` (core lib.rs:233), so a test stub can replace the probe only through that trait. (2) Production wraps the real driver in `DeferredDriver` (wiring.rs:127-165, built at :211). Without a forwarding `login` the trait default `Valid` would silently disable the gate in production. The forward is about 10 lines beside `invoke`. (3) `commit_hold` is a private method of close.rs (close.rs:216), and `hold_for_disk` and `hold_for_slot_wait` sit beside it (close.rs:177, :200). Reusing the existing environment-stop path means adding `hold_for_login` (about 12 lines) there. mod.rs cannot call `commit_hold`. All three were rechecked in round 2 and no design avoids them.",
+      "rejected": [
+        {
+          "option": "A process-global or thread-local probe set in claude.rs and read by disk.rs",
+          "why": "Tests run in parallel threads in one process, so a global probe leaks between tests. Production would still need a wiring.rs or drain.rs install point, so no file is saved."
+        },
+        {
+          "option": "A new field on `Athena`, or on `StateDir` like `with_free_space` (state.rs:233)",
+          "why": "`Athena` is built by struct literal in tests.rs:202, test_support.rs:899, wiring.rs:190 and :212, invocation.rs:363 and others, and state.rs is outside the list too. That touches more files."
+        },
+        {
+          "option": "A free function in core that runs `claude auth status` for any non-fake driver",
+          "why": "Core does not know the binary (`claude_bin()` is in wiring.rs:114), and no test could inject an expired login."
+        },
+        {
+          "option": "Make `commit_hold` pub(super) and write `hold_for_login` in mod.rs",
+          "why": "It still edits close.rs and puts a hold function away from its siblings. Copying the commit logic into the 120 KB mod.rs would be a second copy of the hold-commit rule."
+        }
+      ]
+    },
+    {
+      "choice": "The probe is a trait method that takes the agent's environment: `fn login(&self, env: &BTreeMap<String,String>, within: Duration) -> LoginCheck` with `LoginCheck::{Valid, Lapses { in_s: i64 }}` (`in_s <= 0` means expired already) and a default body of `Valid`. `DeferredDriver` forwards both arguments and returns `Valid` when the real driver cannot be built. (Answers the major finding 4.)",
+      "reason": "Agents run with `.env_clear().envs(&spec.env)` (claude.rs:556-559). `spec.env` comes from `agent_spec` (reading.rs:438-449): `athena_agent::env::build` over the job's `jc.config.agents` (`env_pass`, `env_pass_if_set`), the capability env and the side, read per repository by `JobConfig::at` (run/mod.rs:1045). A probe with a fixed HOME, PATH and three credential names could say `loggedIn:false` for a repository whose agents pass `CLAUDE_CONFIG_DIR` or another credential, and that is a positive answer that would hold every job. So the probe now gets the map the agent gets and runs `<bin> auth status` with `env_clear().envs(env)`, exactly as `invoke_once` runs the agent. `Athena::login_gate` (disk.rs) builds the map through a small `login_env(agents, job, job_dir, side, capability_env, lookup)` that calls `env::build` with `snapshot = job_dir/work`. It differs from the agent's map at most in GIT_CEILING_DIRECTORIES, which has no bearing on a login. The planner and critic get an empty capability env and `Side::Read` (planning.rs:381, :431), the producer `ctx.capability.env(jc)` and `Side::Produce` (producer.rs:164, :360), the verifier the capability env and `Side::Verify` (verification.rs:243-244). Each gate uses the env of the stage that follows it. If `env::build` refuses (a build directory outside the job's, env.rs:123-137), `login_env` gives None and the gate does not hold: the stage itself reports that error. A test pins that a variable named only in the job's config reaches the check and one not named does not.",
+      "rejected": [
+        {
+          "option": "Keep the fixed list HOME, PATH, ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_BASE_URL and pin it with include_str! of Athena's own athena.toml",
+          "why": "That is Athena's config, not the config of the repository a job runs in. The probe could disagree with the agent and a wrong `loggedIn:false` still holds the job and ends the drain."
+        },
+        {
+          "option": "Run the probe with the full inherited environment, as xtask does",
+          "why": "It would read a config directory or variables the agents are never given, so the probe could disagree with the agent."
+        },
+        {
+          "option": "Pass only `env_pass` and `env_pass_if_set` and drop the capability env",
+          "why": "A capability env can set a variable that changes where Claude Code looks for its login. The map is cheap to build in full."
+        }
+      ]
+    },
+    {
+      "choice": "The real probe is `claude auth status` under a 10 s bound, with stdout parsed whatever the exit code. The pure `login_from_status(json, now_ms, within)` returns `Lapses{in_s:0}` for `loggedIn:false` and `Lapses{in_s}` when a numeric `expiresAt` in epoch milliseconds falls before now plus `within`. Everything else is `Valid`: a missing `loggedIn`, a missing expiry, a string or negative expiry, non-JSON, empty output, a spawn failure, a timeout. (Answers finding 6.)",
+      "reason": "What the code shows: `auth status` answers JSON with `loggedIn` and the auth method in about 250 ms and makes no model call (docs/design/athena-v0.md:1768, E20). Setup reads only `loggedIn` (xtask/src/main.rs:793-796). No expiry field is documented anywhere in the repository, so `expiresAt` is read only if present, and its absence never holds a job; an unreadable free-space figure never holds a job either (disk.rs:47). The JSON fixtures in the unit tests contain `expiresAt` because the decision rule needs a fixture, not because the real binary was seen to print it. D190 and the CHANGELOG entry therefore say plainly that in production the `expires within the stage deadline` half is unverified and probably inactive until the field is confirmed, and that even the `loggedIn:false` half assumes `auth status` reports an expired, unrefreshable login that way. Both are open question 3. They do not present the expiry half as delivered. The process wrapper reads stdout on a thread, waits at most `LOGIN_PROBE_WAIT` and kills the child on timeout. It uses `retry_busy` for the spawn as the file does.",
+      "rejected": [
+        {
+          "option": "Read the credentials file for its expiry",
+          "why": "The design says Athena never reads, prints or stores a credential (athena-v0.md:1415-1416); the file's path and fields appear nowhere in the repository."
+        },
+        {
+          "option": "A real model call as the 'authenticated call'",
+          "why": "It costs tokens at every gate; the request asks for a cheap check."
+        }
+      ]
+    },
+    {
+      "choice": "The look-ahead is `min(stage timeout, 3600 s)` through a pure `login_lookahead(stage_timeout_s)` in disk.rs. Gate 1 (dispatch): `planner_timeout_s` and (Side::Read, empty capability env) when the job is planned, else `producer_deadline_s(&jc)` (producer.rs:51) and (Side::Produce, `capability.env(&jc)`). Gate 2: `producer_deadline_s(ctx.jc)`, Side::Produce. Gate 3: `jc.config.budget.verifier_timeout_s` (verification.rs:246), Side::Verify.",
+      "reason": "The live athena.toml sets reader, producer and verifier timeouts to 86400 s (athena.toml:50-52) and planner and critic to 86400 s (:224-225), with the comment that they do not stop work. An uncapped 24 h look-ahead would hold every job whose login expires that day if the probe ever reports an expiry. The driver's own comments say the login normally refreshes by itself within minutes (claude.rs:497-504). The cap is a constant, not a config key, since the reading adds none. It is my choice, so it is open question 1. The dispatch gate sits after `planned` is computed (mod.rs:1111-1113) and before `preflight` (:1117), so the capability and the first stage are known.",
+      "rejected": [
+        {
+          "option": "The raw stage timeout as the look-ahead",
+          "why": "With 86400 s it holds nearly every job if an expiry is reported."
+        },
+        {
+          "option": "A new `[agents] login_lookahead_s` key",
+          "why": "The reading adds no config key and no governance file."
+        }
+      ]
+    },
+    {
+      "choice": "The hold is a typed error `LoginHold { login_in_s: i64 }` in disk.rs with `LOGIN_EXPIRED = \"environment: agent login expired\"`. Its `Display` is written as `format!(\"{}; ...\", self.text())`, so it starts with `text()` as `SlotWait`'s does (disk.rs:303-309). The marker uses the shared hold file (`state.hold_file`, disk.rs:264-331) through `write_login_hold` and `read_login_hold`. `AnyHold` gains `Login(LoginHold)` and `read_any_hold` (disk.rs:351) tries disk, slot wait, then login. (Answers finding 7, first half.)",
+      "reason": "The drain builds the held reason with `format!(\"{error:#}\")` (drain.rs:4722) and classifies it by its start (drain.rs:1747-1761), so the new case only works if `Display` starts with the text; a unit test pins that. The single field `login_in_s` differs from `LowDisk {free, required}` and `SlotWait {waited_s, limit_s}`, so neither older reader parses it and `read_any_hold` returns exactly one kind. `status` shows a hold for a proposed or interrupted job through `read_any_hold(..).map(|h| h.text())` (status.rs:1136-1141). `go_job` matches `AnyHold` exhaustively (run/mod.rs:496-506), so the new arm is compiler-enforced. The text starts with `environment:`, so `is_environment_reason` is true for it. It does not start with `PRODUCER_AUTH`: this hold is not a producer 401 closing and writes no outcome, so `StopCause` (disk.rs:441-490) is untouched. The message tells the user to log in again (run `claude` once, or set ANTHROPIC_API_KEY, as xtask/src/main.rs:800 words it), then run the job again. It names no stage, since three stages share it.",
+      "rejected": [
+        {
+          "option": "Reuse PRODUCER_AUTH for the text",
+          "why": "It says producer, and `StopCause::ProducerAuth` is documented as an API 401 of a producer (disk.rs:446); this hold is a gate before any agent runs."
+        },
+        {
+          "option": "No marker",
+          "why": "`athena status` would show the held job as interrupted with no cause."
+        },
+        {
+          "option": "A new StopCause variant",
+          "why": "scope_guard.rs:790, reading/retry.rs:311 and drain.rs:2731 all match on `StopCause`, and none can see a hold."
+        }
+      ]
+    },
+    {
+      "choice": "Exits of each new gate (one line each). GATE 1, dispatch (mod.rs, between the `planned` computation at :1111-1113 and `preflight` at :1117, so after the disk gates and `clear_hold` at :1105). VALID or unreadable: continues; no state changes. LAPSES: `write_login_hold`, a `held       <text>` ui line, `Err(LoginHold)`; nothing is committed and the evidence snapshot (:1175) is not yet written, so the job stays Proposed; the next `go` dispatches it again, `clear_hold` (:1105) removes the marker first, and the gate asks again; `status` shows the text (status.rs:1140); the drain reads `Run.held` (drain.rs:4713-4731) so `ItemEnd::Held` (:1986, :2761) and the batch stop follow. FAIL or ERROR: cannot happen, since every probe fault and an env build refusal give no hold. INTERRUPT: the probe is a synchronous subprocess bounded at 10 s and the marker is written after it, so an interrupt leaves nothing. GATE 2, before the producer (`produce_and_verify`, after the disk gate at mod.rs:1890-1892, before `producer_snapshot` at :1896). VALID: continues. LAPSES: `hold_for_login` calls `commit_hold` (close.rs:216): it commits the planning and baseline records with no outcome and no score, writes the marker, prints `held`, removes the consumed resume mark and its marker (close.rs:236-239) and returns the `LoginHold`. The job stays Dispatched with no process, no candidate and no resume mark. `dispatch` drops the build folder on return (mod.rs:1396-1401, `BuildFolder::drop`, disk.rs:683); the next drain retries from the start, as for a disk hold before the producer (drain.rs:253-255). COMMIT FAILURE: returns the context error 'job N was held for an agent login, but its records could not be committed' (close.rs:229-232), which is not a `LoginHold`, so the drain treats it as an ordinary error. INTERRUPT, KILL, TIMEOUT: cannot reach this gate, since it is before the producer starts. GATE 3, before the verifier (`check_and_verify`, after the replay record is pushed at mod.rs:2264-2269, before `verification_stage` at :2271). VALID: continues. LAPSES: `remove_tree(&verify_dir)` as at :2174, then `hold_for_login` with the candidate and check records in `closing`. The resume mark stays (written at :1949, and at :2254 with the recorded checks when every check passed), so the next drain lists the job as interrupted and resumes it at the verifier with no planner or producer run (drain.rs:255-260). COMMIT FAILURE: as above. INTERRUPT: before the verifier agent starts, so no verdict is written. Closing, landing and failure exits are unchanged: no gate sits on them. `check_and_verify` has two callers, `produce_and_verify` (:1950) and `resume_candidate`, so a resumed job reaches gate 3 and no gate 2, because no producer runs.",
+      "reason": "The brief requires a table of every exit of each new gate. Placing gate 3 before `verification_stage` keeps verification.rs out of the change; its only cost is that it runs before `demonstration_records` (verification.rs:156), not after.",
+      "rejected": [
+        {
+          "option": "Close the job as failed with an environment reason",
+          "why": "A failed closing counts as an attempt and feeds the scope guard; a hold uses no attempt, as the disk hold does (disk.rs:56-62)."
+        },
+        {
+          "option": "Put the verifier gate inside `verification_stage` next to the disk check (verification.rs:175)",
+          "why": "It would make verification.rs a changed file; the gate in `check_and_verify` has the same state in scope."
+        }
+      ]
+    },
+    {
+      "choice": "Drain: add a pure `held_by_environment(&anyhow::Error) -> bool` (LowDisk, SlotWait or LoginHold) and keep `short ||` in front of it: `held: short || held_by_environment(&error)` in `Steps::run` (drain.rs:4726-4730). The `_ if run.held` arm (:1745) gets a first case for a reason starting with `LOGIN_EXPIRED`: outcome `LOGIN_EXPIRED`, fallback text 'the agent login is expired or about to expire; log in again', then `self.set_stop(Stop::Environment)`. `Stop::meaning` (:1127) and the module-doc list of holds (:249-282) each gain one sentence. (Answers finding 7, second half.)",
+      "reason": "`held` today includes `short` (BudgetShort, drain.rs:4714-4726), which the helper does not name, so `short ||` stays in the call and BudgetShort is not read by the helper. Without the new case the outcome would be mislabelled `environment: low disk` (the else branch, :1757-1761). `Stop::Environment` already means every later item would fail the same way (:1127-1128, set at :2733 for a failed item with the same cause). It also stops the interrupted pass from retrying a held gate-2 or gate-3 job again and again inside one drain. The held item stays queued, so a later drain runs it after the login is renewed. `set_stop` keeps the first stop (drain.rs:1587-1592), so concurrent workers are safe. main.rs:280 (the drain help text for `Stop::Environment`) stays true but incomplete and is left alone, outside the deliverables; it is named in a risk.",
+      "rejected": [
+        {
+          "option": "Leave the drain to pass over each held item",
+          "why": "Every queued item would be read and held again with no progress."
+        }
+      ]
+    },
+    {
+      "choice": "`before each agent stage` is taken to mean the first planner call after dispatch, the first producer call, and the first verifier call. The reader (the first read of a request, and the read again after a configuration change at mod.rs:1053), later planner and critic rounds (planning.rs:313-345, :438, :642) and later producer passes (producer.rs:347-392) are not probed. D190, the CHANGELOG entry and the module doc say so plainly. (Answers finding 5.)",
+      "reason": "The finding allows either a check before each round or a plain statement; the plan states it, and open question 2 asks the user to confirm. A gate between planning rounds needs an edit to planning.rs, and a gate between producer passes needs the work kept as a candidate (`keep_unfinished_work`, producer.rs:409-433), and neither file is on the list. A reader failure is a `Read.error`, not a job closing (drain.rs:4661-4672), and has no job to hold. What still covers them: gate 1 runs seconds before the first planner call, the look-ahead covers up to an hour of each stage, and the existing mid-run 401 retry and the `environment: producer login expired` closing (claude.rs:473-533, producer.rs:419-433) are untouched. In a drain with an expired login a queued item is read first, so the first failure can still be a reader error.",
+      "rejected": [
+        {
+          "option": "Gate every planning round and producer pass",
+          "why": "It edits planning.rs and producer.rs, outside the list, and a producer-pass hold must keep the unfinished work; the look-ahead already covers an hour."
+        },
+        {
+          "option": "Gate the reader in reading.rs",
+          "why": "There is no job to hold at that point and it needs a second hold shape."
+        }
+      ]
+    },
+    {
+      "choice": "The tests are fixtures over production entry points with a scripted stub that decides nothing. `StubLogin` (tests.rs, new) wraps `athena.driver`: `info` and `invoke` delegate to the fake driver; `login` pops the next answer from a shared `Arc<Mutex<VecDeque<LoginCheck>>>` the test keeps and returns `Valid` when the queue is empty; it records every `(env, within)` call in a second shared `Arc<Mutex<Vec<..>>>`. (Answers finding 8.)",
+      "reason": "The queue is shared and an empty queue means `Valid`, so test (c) is scripted `[Valid, Valid, Lapses]`: dispatch passes, the producer gate passes, the verifier gate holds, and the retry, with the queue now empty, is asked three more times and passes; no script edit is needed before the retry. A test can also push an answer through the handle. The core tests drive `Athena::go` with `athena_with(.., counting(counts, Some(root)))` (tests.rs:192, :3485), which exist today. The drain tests use a `Steps` stub in drain.rs's own `mod tests`. The gate logic stays in production code: removing a `login_gate` call must fail the test.",
+      "rejected": [
+        {
+          "option": "A stub that repeats its last answer",
+          "why": "The retry in test (c) would be held again unless the script could be changed."
+        },
+        {
+          "option": "A stub that holds the job itself",
+          "why": "Gate logic would sit in the double and removing the production call would not fail the test."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `LoginCheck { Valid, Lapses { in_s: i64 } }` and the default method `AgentDriver::login(&self, env: &BTreeMap<String,String>, within: Duration) -> LoginCheck` (default `Valid`), with doc comments and a unit test of the default. Outside the reading's list; needed because the trait is defined only here (decision 1).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "purpose": "Add the pure `login_from_status`, `LOGIN_PROBE_WAIT` (10 s), `login_probe(bin, env, within, wait)` (`<bin> auth status` with `env_clear().envs(env)`, stdout read on a thread, kill on timeout, parsed whatever the exit code) and `ClaudeCodeDriver::login`. Unit tests on JSON fixtures and on shell stand-ins, including one that shows the probe sees only the env it is handed. `invoke` and `retry_after_login_expiry` are untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "purpose": "`DeferredDriver` forwards `login(env, within)` to the real driver with the same `get_or_init` as `invoke`, and returns `Valid` when the driver is an `Err`; two unit tests. Outside the list; without the forward the production gate would be disabled by the trait default (decision 1).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Add `LOGIN_EXPIRED`, `LOGIN_LOOKAHEAD_MAX_S`, `login_lookahead`, `login_env`, `LoginHold` (text, Display that starts with the text, Error), `write_login_hold`/`read_login_hold`, `AnyHold::Login`, the extended `read_any_hold`, `Athena::login_gate(jc, job, side, capability_env, stage_timeout_s)`, a module-doc paragraph on the hold and the unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "purpose": "Add `hold_for_login` beside `hold_for_disk`, built on `commit_hold`; it creates no candidate and no resume mark. Outside the list; `commit_hold` is private to this file (decision 1).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Call `login_gate` in `dispatch` (after `planned`, before `preflight`; on a hold write the marker, print `held`, return `Err(LoginHold)`), in `produce_and_verify` (after the disk gate, before `producer_snapshot`; return `hold_for_login`) and in `check_and_verify` (before `verification_stage`; remove `verify_dir` first, then `hold_for_login`); add the `AnyHold::Login` arm in `go_job` (:496).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add `StubLogin` (shared answer queue, empty means `Valid`, shared call log) and the tests (a), (b), (c), (d) and `a_valid_login_runs_the_producer_and_the_verifier_as_before` and `the_fake_driver_login_defaults_to_valid`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `held_by_environment` (LowDisk, SlotWait or LoginHold) used as `short || held_by_environment(&error)` in `Steps::run`; a `LOGIN_EXPIRED` case in the held arm that sets `Stop::Environment`; one sentence in `Stop::meaning` and one bullet in the module-doc list of holds; unit tests in its `mod tests`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One new entry at the top of `### Added` under `## [Unreleased]`, with root cause, fix, limits (expiry half unverified, reader and later rounds not probed, no live output seen) and tests. No existing line is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D190 after D189 with Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet. No existing entry is edited.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Step 1, crates/athena-agent/src/lib.rs: add `pub enum LoginCheck { Valid, Lapses { in_s: i64 } }` (documented: `Lapses` means the login is expired already, `in_s` <= 0, or expires within `within`; an unreadable answer is `Valid`) and the default method `fn login(&self, _env: &BTreeMap<String, String>, _within: Duration) -> LoginCheck { LoginCheck::Valid }` on `AgentDriver` (:145). Add a unit test of the default.",
+    "Step 2, crates/athena-agent/src/claude.rs: add `LOGIN_PROBE_WAIT` (10 s), the pure `pub fn login_from_status(json: &str, now_ms: i64, within: Duration) -> LoginCheck`, and `fn login_probe(bin: &Path, env: &BTreeMap<String,String>, within: Duration, wait: Duration) -> LoginCheck`. The probe runs `<bin> auth status` with `env_clear().envs(env)`, stderr null and stdout piped (spawn through `retry_busy`), reads stdout on a thread, waits at most `wait`, kills the child on timeout (a timeout gives `Valid`) and parses stdout whatever the exit code. Forward `login` from the `AgentDriver for ClaudeCodeDriver` impl (:473). Leave `invoke` and `retry_after_login_expiry` untouched. Unit tests: loggedIn false, loggedIn true, `expiresAt` inside and beyond `within`, string or negative `expiresAt` without a panic, garbage, empty, a missing binary, a stand-in slower than a short wait, and a stand-in that prints `loggedIn:false` unless its own environment holds a marker variable (the probe is handed the marker or an empty map).",
+    "Step 3, crates/athena-core/src/disk.rs: add `LOGIN_EXPIRED`, `LOGIN_LOOKAHEAD_MAX_S = 3600`, `pub fn login_lookahead(stage_timeout_s: u64) -> Duration`, `login_env(agents: &Agents, job: &JobId, job_dir: &Path, side: Side, capability_env: &BTreeMap<String,String>, lookup: impl Fn(&str) -> Option<String>) -> Option<BTreeMap<String,String>>` (a call to `athena_agent::env::build` with `snapshot = job_dir/work`; an `Err` gives None), `LoginHold { login_in_s: i64 }` (Serialize, Deserialize, `text()`, a `Display` that starts with `text()`, Error), `write_login_hold`, `read_login_hold`, `AnyHold::Login` with its `text()`, `read_any_hold` extended, and `Athena::login_gate(&self, jc: &JobConfig, job: &JobId, side: Side, capability_env: &BTreeMap<String,String>, stage_timeout_s: u64) -> Option<LoginHold>` (builds the env with `std::env::var` as lookup, asks `self.driver.login(&env, login_lookahead(..))`, maps `Lapses{in_s}` to a hold). Add a module-doc paragraph. Unit tests: `login_hold_text_tells_the_user_to_log_in_again_and_is_an_environment_stop`, `login_hold_display_starts_with_its_text`, `login_marker_is_read_only_as_a_login_hold`, `login_lookahead_is_the_stage_timeout_capped`, and three `login_env` tests (a variable named only in the job's `env_pass_if_set` reaches the map and an unnamed one does not, using an injected lookup; the capability env is expanded by side; a build directory outside the job's gives None).",
+    "Step 4, crates/athena-cli/src/wiring.rs: forward `login(env, within)` in `DeferredDriver` (:143) with the same `get_or_init` as `invoke`, returning `Valid` when the driver is an `Err`. Add the two wiring unit tests.",
+    "Step 5, crates/athena-core/src/run/close.rs: add `pub(super) fn hold_for_login(&self, ctx, closing, hold: LoginHold) -> anyhow::Error` next to `hold_for_disk` (:177). It calls `commit_hold(ctx, closing, &hold.text(), \"an agent login\", |id| write_login_hold(&self.state, id, &hold))` and returns `hold.into()` on success or the commit error. It creates no candidate and no resume mark.",
+    "Step 6, crates/athena-core/src/run/mod.rs: (a) in `dispatch`, after `planned` (:1111-1113) and before `preflight` (:1117), call `self.login_gate(&jc, &id, side, &env, stage_s)` with `(Side::Read, empty env, planner_timeout_s)` when `planned` and `(Side::Produce, capability.env(&jc), producer_deadline_s(&jc))` otherwise; on `Some(hold)` call `write_login_hold`, print `held       {text}` and `return Err(hold.into())`. (b) In `produce_and_verify`, after the disk gate (:1890-1892), call `login_gate(ctx.jc, &id, Side::Produce, &ctx.capability.env(ctx.jc), producer_deadline_s(ctx.jc))` and `return Err(self.hold_for_login(ctx, closing, hold))`. (c) In `check_and_verify`, after the replay record is pushed (:2264-2269) and before `self.verification_stage(` (:2271), call `login_gate(jc, &id, Side::Verify, &capability_env, jc.config.budget.verifier_timeout_s)`; on `Some` remove `verify_dir` (as at :2174) and `return Err(self.hold_for_login(ctx, closing, hold))`. (d) Add the `AnyHold::Login` arm in `go_job` (:496-506), refusing a held job with the hold text and the way to resume it.",
+    "Step 7, crates/athena-core/src/run/tests.rs: add `StubLogin` (wraps `Arc<dyn AgentDriver>`; `info` and `invoke` delegate; `login` pops the front of a shared `Arc<Mutex<VecDeque<LoginCheck>>>`, returns `Valid` when it is empty, and pushes `(env, within)` onto a shared call log) and the tests (a), (b), (c), (d), `a_valid_login_runs_the_producer_and_the_verifier_as_before` and `the_fake_driver_login_defaults_to_valid`. Install it as `athena.driver = Arc::new(StubLogin { inner: athena.driver.clone(), .. })` after `ask`. For (d), wrap the fake script to capture the producer's `spec.env`. For each of (a), (b) and (c), comment out its `login_gate` call, run the test, see it fail, then restore the call.",
+    "Step 8, crates/athena-cli/src/drain.rs: add `fn held_by_environment(error: &anyhow::Error) -> bool` and use it as `held: short || held_by_environment(&error)` in `Steps::run` (:4726-4730). In the held arm (:1745) add the `LOGIN_EXPIRED` case first (outcome `LOGIN_EXPIRED`, fallback 'the agent login is expired or about to expire; log in again', `self.set_stop(Stop::Environment)`). Add one sentence to `Stop::meaning` for `Environment` (:1127) and one bullet beside the low-disk and slot-wait bullets in the module doc (:249-266). Add the two unit tests in `mod tests`.",
+    "Step 9: CHANGELOG.md: insert one entry at the top of `### Added` (after the heading at :35). docs/decisions.md: append D190 after D189 (ends :5633) with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance. D190 and the entry state what `agent stage` means here, that the expiry half and the expired-login reading of `auth status` are unverified, and that the cap is a choice. The Provenance bullet lists what was read (disk.rs, close.rs, run/mod.rs, claude.rs, env.rs, reading.rs, wiring.rs, drain.rs, xtask/src/main.rs:788-806, athena-v0.md E20) and what ran, and says what was not measured: a live `auth status` output or an expiry field, how often the gate holds a job that would have run, the probe's cost, and the reader and later rounds left unprobed.",
+    "Step 10: run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, each on its own, and fix what they report. No external service, CI run or push is involved; all tests run offline against stubs."
+  ],
+  "risks": [
+    {
+      "risk": "False holds: if `auth status` reports `loggedIn:false` for a refreshable expired access token, or an `expiresAt` that Claude Code would have refreshed during the run, a drain stops with `Stop::Environment` for nothing.",
+      "mitigation": "Only a positive reading holds; unreadable, unparseable or missing answers are Valid. The probe now runs with the environment the agent gets, so it cannot disagree with the agent about which login is in use. The look-ahead is capped at 3600 s, not 24 h. A hold uses no attempt and clears itself once the gate passes. Open question 3 and D190 record that no live output was observed."
+    },
+    {
+      "risk": "The real probe is untested against the real Claude Code binary; tests run offline against stubs.",
+      "mitigation": "The JSON decision is a pure function covered on fixtures; the process wrapper is tested on shell stand-ins (loggedIn false and true, garbage, a missing binary, a stand-in slower than the wait, a stand-in that reads its own environment); the wiring test proves the forward. The Provenance bullet states what was not observed."
+    },
+    {
+      "risk": "If `DeferredDriver` stopped forwarding `login`, the gate would silently disable itself in production, because the trait default is Valid.",
+      "mitigation": "A wiring unit test with a stand-in-backed driver fails when the forward is missing; `grep 'impl AgentDriver for'` shows exactly three impls."
+    },
+    {
+      "risk": "The environment built at the gate differs from the agent's in GIT_CEILING_DIRECTORIES (the snapshot parent) and, for the producer, in PATH (the cargo wrapper, producer.rs:383), and the capability env is read at the gate and again for the stage.",
+      "mitigation": "Neither variable bears on a login. Test (d) compares the check's env with the producer's own `spec.env` on every other key. A capability env that `env::build` refuses gives no hold, and the stage reports the error itself."
+    },
+    {
+      "risk": "Some stage starts are not probed (reader, reread after a configuration change, later planner and critic rounds, later producer passes), and main.rs:280 does not mention the new cause of `Stop::Environment`.",
+      "mitigation": "Named in decision 8, open question 2 and D190. The mid-run 401 retry and the producer-login closing are unchanged. `Stop::meaning` and the module doc carry the new cause."
+    },
+    {
+      "risk": "Gate 3 runs before `demonstration_records` (verification.rs:156), so a login that expires during those builds is not caught there.",
+      "mitigation": "The capped look-ahead covers the later start, and a 401 mid-run is still handled by the existing retry and closing. D190 states the placement."
+    },
+    {
+      "risk": "The probe spawns one process at each of three gates per job, adding latency (about 250 ms each per E20, an estimate and not measured here).",
+      "mitigation": "No model call; a hang is bounded at 10 s and counts as Valid."
+    },
+    {
+      "risk": "The D190 entry and the module-doc edits could trip the decision-link, governed-path or boundary-word checks.",
+      "mitigation": "Write D190 in D189's layout, append only, no Amends or Supersedes phrase, name the governed paths, avoid banned words and email-like text, and run the whole `cargo test --locked`."
+    },
+    {
+      "risk": "Test (d) relies on `PATH` being set in the test process and on the test config naming only `PATH` in `env_pass`.",
+      "mitigation": "`PATH` is set whenever `cargo test` runs; the config edit is committed before `ask`, so the reading's config hash matches (run/mod.rs:1046). The 'named only in the job config' case is tested with an injected lookup, so no test sets an environment variable."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "New `AgentDriver::login` trait method (default `Valid`)",
+      "dependent": "crates/athena-agent/src/fake.rs:79 (`impl AgentDriver for FakeAgentDriver`); crates/athena-core/src/run/tests.rs:192-221; crates/athena-core/src/test_support.rs:893-901; crates/athena-cli/src/wiring.rs:189 (nested runs, fake driver); crates/athena-cli/tests/common/mod.rs:181",
+      "kind": "code",
+      "test": "`cargo test --locked` (the whole suite) with the default body returning `Valid`; `a_valid_login_runs_the_producer_and_the_verifier_as_before` and `the_fake_driver_login_defaults_to_valid`. Only three `impl AgentDriver for` exist (fake.rs:79, claude.rs:473, wiring.rs:143), and the wiring one forwards.",
+      "reason": null
+    },
+    {
+      "name": "New `AgentDriver::login` trait method: the production driver",
+      "dependent": "crates/athena-cli/src/wiring.rs:143 (`DeferredDriver`, built at wiring.rs:211)",
+      "kind": "code",
+      "test": "A wiring unit test sets the `OnceLock` with a `ClaudeCodeDriver::new(stand_in, ..)` over a shell script that prints `{\"loggedIn\":false}` for `auth status`, and asserts `DeferredDriver::login` returns `Lapses`. A second test, with a driver that cannot be built, expects `Valid`. The first fails if the forward is missing and the trait default answers instead.",
+      "reason": null
+    },
+    {
+      "name": "New `AnyHold::Login` variant",
+      "dependent": "crates/athena-core/src/run/mod.rs:496-506 (`go_job`, Dispatched arm, exhaustive match on `AnyHold`)",
+      "kind": "code",
+      "test": "Step 6 adds the arm; the compiler enforces it. Test (b) calls `go` on the held job and checks that the refusal text names the login hold and the way to resume it.",
+      "reason": null
+    },
+    {
+      "name": "Hold marker and `read_any_hold`",
+      "dependent": "crates/athena-core/src/status.rs:1136-1141 (`line.hold = read_any_hold(..).map(|h| h.text())` for proposed and interrupted jobs)",
+      "kind": "code",
+      "test": "Tests (a) and (b) of criterion 3 assert `athena.status()` shows the login hold text on the job's open line, modelled on tests.rs:6656-6663.",
+      "reason": null
+    },
+    {
+      "name": "The shared hold file `state.hold_file`",
+      "dependent": "crates/athena-core/src/disk.rs:264-331 (`write_hold`, `read_hold`, `write_slot_hold`, `read_slot_hold`); tests at tests.rs:7261-7344, :11270, :11412, :11483; disk.rs:2318-2331; crates/athena-cli/tests/drain.rs:3577",
+      "kind": "code",
+      "test": "New disk.rs unit test `login_marker_is_read_only_as_a_login_hold` writes each of the three marker kinds and asserts exactly one reader returns it. The existing tests are unchanged: the login marker's field `login_in_s` fails to parse as `LowDisk` or `SlotWait`.",
+      "reason": null
+    },
+    {
+      "name": "Drain classification of a held run, and `Stop::Environment`",
+      "dependent": "crates/athena-cli/src/drain.rs:4713-4731 (`Run.held`), :1745-1771 (held arm), :1986 and :2761 (`ItemEnd::Held`), :1119-1129 (`Stop::meaning`), :2729-2734 (the failed-twice environment stop), display.rs:771",
+      "kind": "code",
+      "test": "Unit tests in drain.rs `mod tests`: `held_by_environment_is_true_for_low_disk_slot_wait_and_login_holds_only`; `a_login_held_item_ends_the_batch_and_is_not_labelled_low_disk` (a `Steps` stub whose `run` returns `held: true` with the login text: outcome `environment: agent login expired`, `report.stop == Stop::Environment`, the second item is never read or run, both items stay queued). Existing low-disk and slot-wait drain tests (crates/athena-cli/tests/drain.rs:1214, :2864, :3291, :3512) and `budget_short` tests stay green because the new case matches only the login prefix and the fallback stays low disk. `Stop::meaning` is read for non-empty text at drain.rs:5351 and printed at display.rs:771; no test compares the string.",
+      "reason": null
+    },
+    {
+      "name": "`Stop::Environment` meaning in the drain help text",
+      "dependent": "crates/athena-cli/src/main.rs:280 (drain help text listing the causes of `Stop::Environment`)",
+      "kind": "code",
+      "test": null,
+      "reason": "The help text stays true: it lists causes that failed twice. It is not updated, because main.rs is outside the listed deliverables; `Stop::meaning` (the report line) and the module doc carry the new cause. Listed as a risk."
+    },
+    {
+      "name": "Closing-reason classification",
+      "dependent": "crates/athena-core/src/disk.rs:441-543 (`StopCause::of`, `is_environment_reason`, `resumable_stop`, `keeps_unfinished_work`); scope_guard.rs:790; reading/retry.rs:311; drain.rs:2731",
+      "kind": "rule",
+      "test": "disk.rs `login_hold_text_tells_the_user_to_log_in_again_and_is_an_environment_stop`.",
+      "reason": "The plan adds no closing reason. A login hold commits records with no outcome (close.rs:216-241), so no closed record carries its text and none of these classifiers sees it. `StopCause` is not edited. The text starts with `environment:`, so `StopCause::of` would read it as an environment stop; the unit test pins that."
+    },
+    {
+      "name": "Order of the gates at dispatch, before the producer and before the verifier",
+      "dependent": "crates/athena-core/src/run/mod.rs:1092-1105 (dispatch disk gate, `start_hold`, `clear_hold`), :1111-1117 (`planned`, `preflight`), :1890 (pre-producer disk gate), :2271 (verification stage); verification.rs:175",
+      "kind": "code",
+      "test": "`cargo test -p athena-core low_disk` and the whole suite: the existing low_disk tests (tests.rs:6493, :6605, :6684, :11347-11571) run with the default `Valid`, where `login_gate` returns None, changes no state and makes no `free_bytes` call, so the `low_once_*` probes (test_support.rs:793-882) see the same call sequence.",
+      "reason": null
+    },
+    {
+      "name": "`check_and_verify` and its callers",
+      "dependent": "crates/athena-core/src/run/mod.rs:1958 (called from `produce_and_verify` :1950 and from `resume_candidate`)",
+      "kind": "code",
+      "test": "Test (c) of criterion 3: its retry goes through `resume_candidate` into `check_and_verify`, the stub is asked there with a Valid answer, and the job lands with no producer run.",
+      "reason": null
+    },
+    {
+      "name": "A job left Dispatched with no outcome after a login hold",
+      "dependent": "crates/athena-core/src/run/close.rs:155 (`settle_resume_marks`); disk.rs:627 (`reclaim_interrupted`); disk.rs:537 (`resumable_stop`, Dispatched => true); drain.rs interrupted pass (module doc :243-260)",
+      "kind": "code",
+      "test": "Test (c) resumes through `retry` and lands. Test (b) checks the state left by a pre-producer hold.",
+      "reason": "`hold_for_login` is `commit_hold` with a different text and marker, the same state as `hold_for_disk` (close.rs:170-189); no code reads the kind of the hold except the display and the `go` arm above."
+    },
+    {
+      "name": "Build-folder slot and concurrent jobs (`[parallel] max_concurrency`)",
+      "dependent": "crates/athena-core/src/disk.rs:664-770 (`BuildFolder`, `take_build_folder`); run/mod.rs:1396-1401 and :2413-2442",
+      "kind": "code",
+      "test": "Test (b) asserts the build-folder holder file is gone after the pre-producer hold, as `the_build_folder_is_freed_when_a_job_is_held_for_low_disk_before_its_producer` (tests.rs:11571) does for disk.",
+      "reason": "Gate 1 runs before planning and before the slot is taken (disk.rs:29-30). Each worker probes for itself, the marker is per job, and in-flight items finish while the drain stops (`set_stop` keeps the first stop, drain.rs:1587-1592)."
+    },
+    {
+      "name": "Job config read by the gates: `[agents] env_pass` and `env_pass_if_set`, `[budget] producer_timeout_s`, `verifier_timeout_s`, `[job_plan] planner_timeout_s`",
+      "dependent": "athena.toml:50-52, :62-73, :224-225, read per repository through `JobConfig::at` (run/mod.rs:1045) by `login_env` and by the stage-timeout arguments of the three gates",
+      "kind": "host_setting",
+      "test": "`cargo test -p athena-core login_env` (a variable named only in the job's config reaches the check; an unnamed one does not) and test (d) of criterion 3 (the env the check receives at each gate).",
+      "reason": "Read-only: no value changes and no key is added. The live timeouts are 86400 s, hence the 3600 s cap. Other callers of `athena_agent::env::build` (reading.rs:438, run/mod.rs:2074, producer.rs:191, checks.rs:478, :1028, :1298, records_criteria.rs:814, introspect.rs:1934) are not edited; `login_env` is one more caller."
+    },
+    {
+      "name": "Prompt-set token budgets",
+      "dependent": "docs/system-facts.md budgets; crates/athena-context/prompts/*; crates/athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt or brief file changes, so `system_facts_budgets_match_computed` sees the same sizes."
+    },
+    {
+      "name": "Record schemas and refusal rules",
+      "dependent": "records/, `check_record_file`, the `AnyRecord` round trip, crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No record type or file is added; the marker is a local state file like the disk marker (disk.rs:264-272). No reading, plan or admission rule is added or changed: the new parser reads the Claude CLI's JSON, not a request or reading text, so no input form maps to a corpus case and no refusal_corpus case is added."
+    },
+    {
+      "name": "New decision D190 and new doc text",
+      "dependent": "docs/decisions.md decision-link and governed-path checks (`decision_gate` and `link_problems` in crates/athena-core/src/run/checks.rs, `docs/decision-links.toml`); xtask/tests/policy.rs boundary-word scan",
+      "kind": "rule",
+      "test": "`cargo test --locked` (the whole suite).",
+      "reason": "D190 is written in D189's layout, appended with no existing line edited, uses no Amends or Supersedes phrase and names the governed paths. The new text contains no banned boundary word and no email-like string."
+    },
+    {
+      "name": "Design docs that describe the disk hold",
+      "dependent": "docs/design/async-drain.md, docs/design/agent-and-build-slots.md, docs/architecture.md",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not in the deliverable list. The `grep` hits for these names in .rs and .toml files that I read are doc comments (for example disk.rs:88, :645, :774), not `include_str!` or file reads, so no test compares them with code. The new rule is stated in D190 and the drain.rs and disk.rs module docs, which are the places the code's hold rules are written."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content criterion: read the diff, then run the agent and core unit tests of the decision rule and of the environment the check is given.",
+      "command": "git diff -- crates/athena-agent/src crates/athena-core/src/disk.rs crates/athena-core/src/run/mod.rs crates/athena-cli/src/wiring.rs",
+      "observes": "The diff shows `LoginCheck` and the default `AgentDriver::login(env, within)` in athena-agent lib.rs; `login_from_status` and `ClaudeCodeDriver::login` in claude.rs; `login_lookahead`, `login_env` and `Athena::login_gate` in disk.rs; and three calls in run/mod.rs: in `dispatch` after `planned` and before `preflight`, in `produce_and_verify` after the disk gate and before `producer_snapshot`, and in `check_and_verify` before `verification_stage`. None of them sits only on a 401 path. The `DeferredDriver` forward is in wiring.rs. Then `cargo test -p athena-agent login` passes: `loggedIn:false` gives Lapses; `loggedIn:true` with no `expiresAt` gives Valid; an `expiresAt` inside `within` gives Lapses; one beyond it gives Valid; string, negative, empty and non-JSON output give Valid; a missing binary and a stand-in slower than the wait give Valid; a stand-in that prints `loggedIn:false` unless its own environment holds a marker variable shows the probe sees only the map it is handed. `cargo test -p athena-core login_env` passes: a variable named only in the job's `env_pass_if_set` (lookup injected, no set_var) reaches the map and an unnamed one does not; the capability env is expanded with the side; a build directory outside the job's gives None.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Content criterion: read `hold_for_login` and the hold text, then run the unit tests and the pre-producer core test.",
+      "command": "git diff -- crates/athena-core/src/run/close.rs crates/athena-core/src/disk.rs",
+      "observes": "`hold_for_login` calls `commit_hold` exactly as `hold_for_disk` does (close.rs:177-189), contains no call to `write_resume_mark` and builds no candidate. `LoginHold::text()` starts with `environment: agent login expired` and tells the user to log in again and run the job again; its `Display` starts with `text()`. `cargo test -p athena-core login_hold` passes: `login_hold_text_tells_the_user_to_log_in_again_and_is_an_environment_stop` (`is_environment_reason` true, `StopCause::of` is not `ProducerAuth`, the text contains 'log in again'), `login_hold_display_starts_with_its_text`, and `login_marker_is_read_only_as_a_login_hold` (each of the three marker kinds is read back by exactly one reader). `cargo test -p athena-core expired_login_before_the_producer` passes; it asserts no candidate and no resume mark (see criterion 3).",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Three new core tests, each driven through `Athena::go` with `StubLogin` over the fake driver, plus one for the environment. Each of the first three is shown to fail by mutation: comment out its `login_gate` call, run it, see it fail, restore. (a) `expired_login_at_dispatch_holds_the_job_and_runs_no_agent`, queue `[Lapses{in_s:-60}]`. (b) `expired_login_before_the_producer_holds_with_no_candidate_and_no_resume_mark`, queue `[Valid, Lapses{in_s:0}]`. (c) `expired_login_before_the_verifier_holds_with_the_candidate_and_a_retry_resumes_it`, queue `[Valid, Valid, Lapses{in_s:0}]`, then `athena.retry` as in tests.rs:6556-6598. (d) `the_login_check_gets_the_environment_the_agent_gets`: the repository's athena.toml is edited (committed before `ask`, as at tests.rs:1093-1099) to `env_pass = [\"PATH\"]`.",
+      "command": "cargo test -p athena-core login",
+      "observes": "(a) `go` returns an error that downcasts to `LoginHold`; `counts.all()` shows planner, producer and verifier at 0 (only the reader ran, for `ask`); the job is `JobState::Proposed` and `job.is_none()` (no dispatch commit); `read_login_hold` returns the marker; the ui lines contain `held       environment: agent login expired`; `athena.status()` shows that text on the job's line. (b) The job is Dispatched with no outcome and no score; `held.candidate` is None; no producer invocation is recorded and the producer count is 0; `athena.state.read_resume(&job)` is None; the build-folder holder file is gone (as tests.rs:11571 asserts for low disk); the status line is `interrupted` with the hold text (as tests.rs:6656-6663). (c) The producer count is 1 and the verifier count 0; the candidate and a verifier-stage resume mark exist and the verifier snapshot dir is gone; after `retry` and `go` the job lands, the producer count stays 1 and the verifier count becomes 1. (d) For each of the three gates the env the stub received has `PATH`, has no `HOME`, and has `CARGO_TARGET_DIR` ending in `target/produce`, `target/produce` and `target/verify`; for gate 2 it equals the producer invocation's own `spec.env` on every key except PATH (the cargo wrapper changes PATH, producer.rs:383), captured by a wrapper around the fake script. In all of them the `within` the stub was asked with equals `Duration::from_secs(min(the stage timeout read from the repository's config by JobConfig::at, 3600))`, computed in the test, not by `login_lookahead`.",
+      "fails_without": "Remove the `login_gate` call at the gate under test. In (a) the stub's expired answer is never asked, `go` runs to `Finished` and `expect_err` panics, with the producer count at 1. In (b) the producer count is 1 and the held-state assertions fail. In (c) the verifier count is 1 and the job is not held. In (d) a gate that built the env from a fixed list would show `HOME` or miss `CARGO_TARGET_DIR`, and a gate with no env would fail the equality with the producer's `spec.env`.",
+      "seam": "Production entry point `Athena::go` (run/mod.rs:417), reached through `Athena::ask`. Guards and preconditions: job Proposed with a reading that has a capability, no line pause, and an unchanged config hash (dispatch at mod.rs:1042-1046). Fixture: `athena_with(&repo, &state, PASSES, plenty_of_space, counting(counts, Some(root)))` (tests.rs:192, :3485, :3452; exists). After it the test assigns `athena.driver = Arc::new(StubLogin { inner: athena.driver.clone(), answers, calls })`, replacing the pub field at core lib.rs:233. `StubLogin` is added by plan step 7 and the `AgentDriver::login` method it overrides by step 1. The producer count and `spec.env` come from the fake script, so the producer path is the real invoke path and the stub holds no gate logic."
+    },
+    {
+      "criterion": 4,
+      "method": "New test `a_valid_login_runs_the_producer_and_the_verifier_as_before`: `StubLogin` has an empty queue, so it answers `Valid` every time, and `go` runs a job to its verdict. A second small test `the_fake_driver_login_defaults_to_valid` pins the trait default on `FakeAgentDriver`.",
+      "command": "cargo test -p athena-core valid_login",
+      "observes": "`go` returns `Finished` landed, as the happy-path tests do (readme contains the producer's text as at tests.rs:6595). Producer count 1, verifier count 1, planner 0. `read_any_hold` is None. The stub was asked exactly three times (dispatch, producer, verifier), each with the capped look-ahead, so the gates ran and did not hold.",
+      "fails_without": "A gate that held on `Valid` (an inverted check) makes `go` return a `LoginHold` error, the producer count stays 0 and the test fails. A gate that is never called leaves the ask count at 0 and fails the 'asked three times' assertion.",
+      "seam": "Same as criterion 3: `Athena::go` through `athena_with`/`counting` (exists, tests.rs:192, :3485) with `StubLogin` (step 7) assigned to the pub field `Athena.driver`. `StubLogin` returns only the scripted answer or `Valid`."
+    },
+    {
+      "criterion": 5,
+      "method": "Run each check as its own command, as Athena does. The whole existing suite runs unchanged except for the new tests and the added match arm.",
+      "command": "cargo test --locked",
+      "observes": "`cargo fmt --all --check`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked` each exit 0. The existing hold tests (low_disk_* in run/tests.rs and crates/athena-cli/tests/drain.rs, the slot-wait tests at tests.rs:7232-7344, and `read_any_hold` assertions at tests.rs:7299, :11270, :11412, :11483) stay green. The drain tests for low disk and slot wait keep their outcome labels, because the new drain case fires only for a reason that starts with `environment: agent login expired`. `system_facts_budgets_match_computed` is unchanged, since no prompt file changes.",
+      "fails_without": "If the trait default returned a lapsing answer, or a gate held on `Valid`, every existing `go` test in run/tests.rs and the CLI tests that use `FakeAgentDriver` would end in a `LoginHold` error and fail. If the new `AnyHold::Login` arm were missing, the build fails, since `go_job`'s match is exhaustive. If the drain helper dropped `short ||`, the existing `budget_short` drain tests (crates/athena-cli/tests/drain.rs) fail.",
+      "seam": "No new seam. The existing tests drive `Athena::go` through `athena()` and `athena_with` (tests.rs:180-221) and the CLI fixture (crates/athena-cli/tests/common/mod.rs:181) with `FakeAgentDriver`, which answers with the default `login`. All of this exists today."
+    },
+    {
+      "criterion": 6,
+      "method": "Content criterion: read the diffs of the changelog, the decision log and the two module docs.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md crates/athena-cli/src/drain.rs crates/athena-core/src/disk.rs",
+      "observes": "CHANGELOG.md: one new bullet at the top of `### Added` under `## [Unreleased]` (after the heading at CHANGELOG.md:35), with root cause, fix, limits and tests; its limits say the expiry half is unverified and probably inactive in production, the reader and later rounds are not probed, and no live `auth status` output was seen. docs/decisions.md: a new `D190 · An expired or soon-expiring agent login holds a job before it is dispatched, before its producer and before its verifier`, appended after D189 (which ends at decisions.md:5633), with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance bullets in D189's layout; it uses no Amends or Supersedes phrase. The rule is also stated in the drain.rs module-doc list of holds (:249-282) and the disk.rs module doc. Only added lines appear in CHANGELOG.md and docs/decisions.md; no existing line is edited. The Provenance bullet lists what was read and ran, and says not measured: a live `claude auth status` output or an expiry field, how often the gate holds a job that would have run, the probe's time cost, and the reader and later rounds left unprobed.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: The look-ahead is the stage timeout capped at 3600 s (`LOGIN_LOOKAHEAD_MAX_S`), because the live stage timeouts are 86400 s (athena.toml:50-52, :224-225) and the cap only matters if the probe reports an expiry. Do you want a different cap, or the raw stage timeout (which would hold nearly every job if an expiry is reported)?",
+    "User: `before each agent stage` is built as three probes: at dispatch (ahead of the first planner call), before the first producer call, and before the first verifier call. The reader (including the read again after a configuration change), later planner and critic rounds and later producer passes are not probed, because that needs edits to planning.rs, producer.rs and reading.rs, which are not on the list, and a producer-pass hold has to keep unfinished work. In a drain with an expired login the first failure can therefore still be a reader error. Is that reading of 'each agent stage' right, or do you want per-round probes and a reader probe in a follow-up?",
+    "Host: Does `claude auth status` at the pinned Claude Code 2.1.302 (athena.toml:60) print a login expiry time (and under which field name), and does it report `loggedIn:false` for an access token that has expired but could be refreshed? The code settles only part of this: the repository documents only `loggedIn` and the auth method in that output (docs/design/athena-v0.md:1768; xtask/src/main.rs:793-796), and the driver's comments say the login normally refreshes by itself (claude.rs:497-504). The plan reads `expiresAt` (epoch ms) only if present and treats everything else as Valid, so the gate never holds on what it cannot read; until this is answered the expiry half is probably inactive in production."
+  ],
+  "producer_section_sha256": "5e423210ea2b1d28b4d63c5b57705d475c1e068757a382fc8f334db6801d19d0"
+}

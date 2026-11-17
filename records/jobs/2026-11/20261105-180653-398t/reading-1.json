@@ -1,0 +1,163 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261105-180653-398t",
+  "n": 1,
+  "at": "2026-11-16T23:33:57.850327165Z",
+  "invocation_seq": 6,
+  "base_commit": "d7ef6159c9c0530ccb8caf3914fcf1232bec2db4",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Detect and finish landed jobs whose PR never merged to main",
+  "summary": "Jobs 20261105-001940-nvyd (PR 399) and 20261104-124034-ysc4 (PR 397) were recorded landed while their PRs stayed open after one failed pull_request CI run. I will add detection to `athena status` and the drain, which list each landed job whose PR is open and whose landing commit is not on main, then re-trigger or finish the merge. A test covers a landed job whose merge never happened. The audience is the operator running Athena.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests added; fmt, clippy and test criteria."
+    },
+    {
+      "id": "root-cause",
+      "how": "The root cause of the unmerged PRs is investigated and fixed generally, not just for these two PRs."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that fail without the detection."
+    },
+    {
+      "id": "no-empty-success",
+      "how": "An empty unmerged list is reported as 'none found' and a check that could not run is reported separately."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Environment: the producer and verifier run in a sandbox copy with no network, no GitHub credentials and no push rights, so they run only cargo and read git. Athena runs on the owner's machine through the `gh` client in crates/athena-core/src/gh/client.rs, with the owner's repository token. Reads: PR state, check runs and main's first-parent commits. Writes: re-running a failed pull_request workflow, enabling or performing the merge of the open PR, and landing records. It cannot reach other repositories. With no origin or a non-GitHub origin the detector reports 'cannot check: no GitHub origin', changes nothing and does not fail status or drain. With a GitHub origin it checks and acts. Tests use the fake hosts in crates/athena-core/src/test_support.rs, not the network.",
+    "Code survey: I read crates/athena-core/src/run/close.rs (landing paths, `landed` outcome and landed_commit at lines ~330-600), crates/athena-core/src/reconcile.rs (reconcile walk, `status_with_reconcile`, CommitHost, Finding), and grepped crates/athena-core/src/gh/client.rs (PrHost: open_pr, merge, merged_commit), crates/athena-core/src/status.rs (StatusView, landed_job_ids) and test_support.rs (fake hosts). Entry points: `athena status` goes through status_with_reconcile; the drain is crates/athena-cli/src/drain.rs. Detection must run after reconcile and read the host PR state directly, never through a stand-in such as the job's end state. No new record or data file under crates/ is planned, so the AnyRecord/check_record_file round-trip is not touched; if one is needed it must be covered by that test.",
+    "Root cause to establish first (read-only investigation from the code and recorded PR data): why the merge did not follow the failed CI run. Likely the landing is recorded as soon as the PR is opened or auto-merge is requested, and a failed CI run with no later run leaves the PR open with nothing that re-triggers it. The producer records the finding in CHANGELOG.md and the code docs. Only the owner can run `gh` against PRs 397 and 399.",
+    "Getting the two changes onto main: this candidate cannot push. The new finish-the-merge path is how PRs 397 and 399 reach main when the owner next runs `athena status` or `athena drain`. The two jobs' own diffs are not re-implemented here; they stay on their PRs.",
+    "Previous results: job 20261105-001940-nvyd findings (CHANGELOG hedge about the 42 requests, no multi-item batch test, held requests less visible in queue listings) are not addressed because they concern the proposed-request selection, not the landing. Job 20261104-124034-ysc4 findings (extra README.md and job_plan.rs changes; stale spec.toml text on OLY-8-09; changed `--json` shape) are likewise not addressed. All their changed files are excluded in out_of_scope as work to be kept as landed on their own PRs.",
+    "The request names crates/athena-core/src/run/close.rs as the file. The detection may need reconcile.rs, status.rs, gh/client.rs and drain.rs, listed with lower probability."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new function in crates/athena-core (reconcile.rs or close.rs) finds landed jobs whose PR is open and whose landing commit is not on main's first-parent history. Check the diff.",
+      "kind": "content"
+    },
+    {
+      "text": "The status view and `athena status` output list each such job with its id and PR number. The drain also lists them. Check the diff in status.rs and crates/athena-cli/src/drain.rs, and the CHANGELOG.md entry that gives the root cause.",
+      "kind": "content"
+    },
+    {
+      "text": "A test uses the fake host to build a landed job whose PR is open with one failed pull_request run and a landing commit not on main. It asserts the job is listed, and that the re-trigger or merge is called once. A second run on a merged PR does nothing. Run `cargo test`. The test must fail when the detection is removed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test covers no origin or a non-GitHub origin: it reports 'cannot check', writes nothing and does not fail status or the drain. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A drain test shows an unmerged landed job does not stop the batch, and the next queued item still runs. Run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No unrelated behavior changes. The diff touches only the landing, status and drain code, their tests and CHANGELOG.md, and no file under athena.toml, defaults.toml or .github/workflows/.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy` and `cargo test`. All pass, and the Athena-recorded passing results on the final tree count as evidence.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/reconcile.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Re-implementing or editing the two jobs' own changes, which stay on their PRs 397 and 399: crates/athena-cli/src/drain.rs behavior for item failures (job ysc4), crates/athena-core/src/steward.rs (job nvyd), crates/athena-cli/src/display.rs, crates/athena-cli/src/main.rs, README.md, and crates/athena-cli/tests/job_plan.rs. Any edit to drain.rs or tests/drain.rs here is limited to the unmerged-landing listing.",
+    "Fixing the findings of jobs 20261105-001940-nvyd and 20261104-124034-ysc4, including docs/spec.toml OLY-8-09.",
+    "Pushing, merging or running gh from the producer or verifier.",
+    "Changes to athena.toml, defaults.toml, rust-toolchain.toml or .github/workflows/ (CI configuration).",
+    "Editing records/ or docs/decisions.md."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 1.0,
+        "p50": 3.0,
+        "p90": 8.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2800.0,
+        "p90": 6000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6858552631578947,
+      "p_user_intervenes": 0.06017699115044248,
+      "cost_usd": {
+        "p10": 0.5540958486904357,
+        "p50": 1.5358,
+        "p90": 6.46785557175874
+      },
+      "wall_time_s": {
+        "p10": 608.8643803587555,
+        "p50": 2206.9206192650086,
+        "p90": 4579.061116825767
+      }
+    }
+  },
+  "departures": "Hard job touching landing, status and the drain across several crates, and the PRs cannot be merged from the sandbox, so cost, time and intervention are above the reference.",
+  "hard_reason": "It changes landing and the drain, adding a check that can hold or re-trigger merges of already-landed jobs, so a mistake could merge wrongly or hide unmerged work.",
+  "producer_effort": "high"
+}

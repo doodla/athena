@@ -1,0 +1,265 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-013524-85wt",
+  "round": 1,
+  "at": "2026-11-16T06:13:56.834177956Z",
+  "invocation_seq": 2,
+  "approach": "The drain already continues past every self-stopping item, so no behavior changes. Evidence, all in crates/athena-cli/src/drain.rs: `attempts` returns Paused, Awaiting, Flagged, Failed, NeedsAccepting, Held, Skipped and Waiting at lines 1963-2053 and none of them sets a stop. `finish` (2684-2780) only calls `pass_over` for those eight ends. `take_until_done` (2783-2799) stops only when `stopped()` is true. The three run-ending arms are Budget, JobLimit and Stop, which call `set_stop` at 2741, 2745 and 2749. Failed ends the run only through `StopCause` at 2729-2734, and that stays. What is missing is the one list, the exhaustiveness test, and a test per state that checks the next item lands. Plan: (1) in drain.rs add one macro-generated list, a pub fieldless `ItemEndKind` with `ALL` and `label()`, so the enum and `ALL` cannot drift apart. (2) Add `ItemEndKind::after()`, an exhaustive match with no wildcard arm that returns `AfterItem::Continues` or `AfterItem::EndsRun(Option<Stop>)`. (3) Add `ItemEnd::kind()`, also exhaustive. A new `ItemEnd` variant then fails to compile until it has a kind and an `after()`. (4) `finish` computes `after` first and sets the stop from the list after the match, in place of the three hand-written `set_stop` calls. The order is the same: `pass_over`, then `set_stop`. The Failed environment stop stays as it is. (5) In tests/drain.rs add four Stub knobs: `held`, `held_runs`, `unread` and `waiting_to_merge`. The Stub has no fields for those states today (Stub impl, tests/drain.rs:127-326). Add one `the_batch_goes_on_past_*` test per continuing state, all through `drain::drain`, each asserting that the next item `b` ran, landed and that the run ended `QueueEmpty`. Add two tests for the budget and job-limit stops after a skipped item. Add an exhaustiveness test that matches every `ItemEndKind` with no wildcard arm to the name of the test that drives it, and fails if that test fn is missing from the file. (6) Add a unit test in drain.rs that calls `finish` for a sample of every kind and checks the stop set agrees with `after()`. (7) Add a CHANGELOG entry and a new D190 in docs/decisions.md.",
+  "decisions": [
+    {
+      "choice": "One list: a macro in drain.rs that defines the pub `ItemEndKind` enum, its `ALL` array and its label from a single invocation. `after()` is an exhaustive match with no wildcard arm. `ItemEnd::kind()` is also an exhaustive match.",
+      "reason": "`ItemEnd` is private and carries `String` payloads, so the integration test in tests/drain.rs cannot name it. A pub fieldless kind is visible to it, as `Stop::ALL` is (tests/drain.rs:2510). The macro removes the ALL-drift case where a variant is added to the enum but not to the array. Adding an `ItemEnd` variant breaks the build at `kind()`, then at `after()`, then at the test's exhaustive match. A new kind is therefore handled in code and in tests before anything compiles.",
+      "rejected": [
+        {
+          "option": "A hand-written `const ALL` array beside the enum, as `Stop::ALL` (drain.rs:1091)",
+          "why": "A variant missing from the array is silent, and the request asks that adding a state without handling it must fail."
+        },
+        {
+          "option": "Test over `ItemEnd` itself",
+          "why": "The enum is private to drain.rs, and tests/drain.rs is an integration test that sees only pub items."
+        },
+        {
+          "option": "Use a strum-style derive crate",
+          "why": "It adds a dependency, and D173 requires a decision for each new one."
+        }
+      ]
+    },
+    {
+      "choice": "`finish` takes its run-ending stops from the list: `AfterItem::EndsRun(Some(stop))` is Budget→BudgetSpent, JobLimit→JobLimit and Stop→Requested. Idle is `EndsRun(None)` because another worker already set the stop. Landed, Failed and the six other self-stopping ends are `Continues`.",
+      "reason": "The list and the code then agree by construction, and a unit test checks it for every kind. Failed stays Continues because only an environment cause of its failure ends the run, through `StopCause` (drain.rs:2729-2734), which is the existing rule and out of scope. Behavior is unchanged: Budget, JobLimit and Stop still call `pass_over` and then `set_stop`.",
+      "rejected": [
+        {
+          "option": "A `debug_assert!` in `finish` that a continuing kind leaves `stop` unset",
+          "why": "With parallel workers another worker may set a stop between the two reads, so the assert would be flaky."
+        },
+        {
+          "option": "Make `Failed` an `EndsRun` kind when its cause is environmental",
+          "why": "That is failure-cause sorting, which the brief puts out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "The state and reason stay on the existing `plan       <id> passed over: <reason>` ui line (`pass_over`, drain.rs:1542-1550). `Report` and `display::drain` are not changed. The reason text of each arm already names its state: 'line a is paused', 'line a is flagged', 'awaiting diagnosis', 'failed twice', 'held:', 'not ready:', 'skipped:', 'waiting to merge'.",
+      "reason": "Existing tests require the summary NOT to repeat the pass-over: tests/drain.rs:814 (`lift_mentions(&text, \"a\") == 0`) and 1062-1063 (summary lacks 'failed twice'). Changing the summary would break tests that must stay unchanged.",
+      "rejected": [
+        {
+          "option": "Add a passed-over list to `Report` and the summary",
+          "why": "It breaks tests/drain.rs:814 and 1062-1063 and changes unrelated output."
+        }
+      ]
+    },
+    {
+      "choice": "Exhaustiveness test in tests/drain.rs: for each kind in `ItemEndKind::ALL`, a no-wildcard `match` returns the name of the test that drives it. The test then asserts `include_str!(\"drain.rs\")` contains `fn <name>(`, and that kinds whose `after()` is `Continues` and that are not Landed map to a `the_batch_goes_on_past_` test.",
+      "reason": "A new variant fails to compile at the match. A deleted or renamed driving test fails at run time. Landed maps to `items_are_worked_in_plan_order_not_oldest_first`. Budget and JobLimit map to the new tests that follow a skipped item. Stop maps to `a_stop_asked_for_mid_run_finishes_the_current_job_and_starts_no_other` (tests/drain.rs:1382). Idle maps to `passed_over_item_is_logged_once_with_its_reason` (tests/drain.rs:6635; its 'run ended first' case for c at 6665).",
+      "rejected": [
+        {
+          "option": "Only assert `ALL.len() == 13`",
+          "why": "It does not name which state lacks a test."
+        }
+      ]
+    },
+    {
+      "choice": "Exit table of `Drain::finish`, with the exits of `Drain::attempts`. Each exit is listed with its handler, the state it leaves and the code that reads it next (take_until_done, drain.rs:2783-2799, reads `stopped()` and `queue`; the report reads `queued`, `jobs` and `stop`). Landed (attempts 2024-2026; finish 2686-2714): leaves the item landed and rebuilds and rates, and a rating or rebuild may set a stop that `stopped()` reads next. Failed (attempts 2050-2053; finish 2715-2735): leaves the item queued with a 'failed twice' pass-over line, and sets Stop::Environment only if `StopCause` is ProducerAuth or LowDisk. Budget (attempts 1982 and 2031; finish 2736-2742): pass-over, then Stop::BudgetSpent from the list, so `stopped()` ends the loop. JobLimit (attempts 1983; finish 2743-2746): pass-over, then Stop::JobLimit. Stop (attempts 1959; finish 2747-2750): pass-over, then Stop::Requested. Idle (attempts 1984; finish 2751-2753): pass-over only, because another worker already set the stop, so `stopped()` is already true. NeedsAccepting (attempts 1985; finish 2754-2760): pass-over 'not ready', and `stopped()` stays false so the next item is popped. Held (attempts 1986; finish 2761-2767): pass-over 'held:', no stop. Waiting (attempts 2029; finish 2768): pass-over 'waiting to merge', no stop. Paused (attempts 1964 and 2043; finish 2769-2771) and Flagged (attempts 2046) and Awaiting (attempts 1970 and 2051): pass-over with the scope guard's reason, no stop. Skipped (attempts 2000; finish 2772-2778): pass-over 'skipped:', no stop. Interrupt: a stop request is read at the job boundary (attempts 1958) and is the Stop exit above; a panic inside a worker is not changed by this plan. Error exits of `run_job` (unread reads, a run with no outcome) land in Skipped or Failed above.",
+      "reason": "Required by the planner rules for a changed core flow. Only the three `set_stop` arms are edited; every other arm keeps its text.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add the one list (`ItemEndKind` through a macro, with `ALL` and `label`), `AfterItem`, `ItemEndKind::after()` and `ItemEnd::kind()`, both exhaustive. `finish` takes the three run-ending stops from the list. Add the unit test `finish_agrees_with_the_item_end_list` to the existing test module.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the Stub knobs `held`, `held_runs`, `unread` and `waiting_to_merge`, eight `the_batch_goes_on_past_*` tests, two limit tests after a skipped item, and `every_end_of_an_item_has_a_test_that_drives_it`. Existing tests are unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under [Unreleased] > Changed: the list, the exhaustiveness test, the per-state tests, that behavior is unchanged, and the limits.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add a new entry D190 at the end. Existing entries are not edited.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read drain.rs 1423-1458 (ItemEnd), 2684-2780 (finish) and 1043-1149 (Stop with ALL, label and meaning) so the new list follows the same shape.",
+    "In drain.rs, near `ItemEnd`, add a macro `item_end_kinds!` that, from one invocation listing Landed, Failed, Budget, JobLimit, Stop, Idle, NeedsAccepting, Held, Skipped, Waiting, Paused, Flagged and Awaiting with a label each, defines the pub enum `ItemEndKind` (Debug, Clone, Copy, PartialEq, Eq), `ItemEndKind::ALL` and `ItemEndKind::label()`. Add `pub enum AfterItem { Continues, EndsRun(Option<Stop>) }` and `ItemEndKind::after()` as an exhaustive match with no wildcard arm: Budget → EndsRun(Some(BudgetSpent)), JobLimit → EndsRun(Some(JobLimit)), Stop → EndsRun(Some(Requested)), Idle → EndsRun(None), all others → Continues. Doc-comment that Landed is Continues, that Failed is Continues apart from the `StopCause` environment stop, and that adding an `ItemEnd` variant breaks the build here on purpose. Add `ItemEnd::kind()` as an exhaustive match. Update the `ItemEnd` and module docs to point at the list.",
+    "In `finish`, compute `let after = end.kind().after();` before the match, drop the three `self.set_stop(..)` calls in the Budget, JobLimit and Stop arms (keeping their `pass_over` calls), and add after the match `if let AfterItem::EndsRun(Some(stop)) = after { self.set_stop(stop); }`. Leave the Landed arm and the Failed environment check unchanged. Keep `ItemEndKind` and `AfterItem` pub so tests/drain.rs can use them.",
+    "In tests/drain.rs add to `Stub`: `held: Vec<(&'static str, &'static str)>` (returned by a new `Steps::held` override that filters by the jobs asked about, like `flagged`), `held_runs: Vec<&'static str>` (`run` returns `Run { held: true, reason: \"budget short: ...\", outcome: None, .. }` for those jobs), `unread: Vec<&'static str>` (`read` returns `Read { job: Some(job), error: Some(\"the reader gave no reading\"), runnable: false, .. }` for `ReadOf::Queued` of those jobs), and `waiting_to_merge: Vec<&'static str>` (`land` returns `Landing::Waiting(\"checks have not finished\")`). Add `hold_text(line)` beside `pause_text` and `flag_text`, wording the reason with 'awaiting diagnosis'. Add the helper `assert_batch_continues(kind, stub, state_text, reason_text)` using `Stamped`, and the eight `the_batch_goes_on_past_*` tests (a paused item, a flagged item, an item awaiting diagnosis, an item that failed twice, a held item, an item that needs accepting, a skipped item, an item waiting to merge).",
+    "In tests/drain.rs add `the_batch_goes_on_past_a_skipped_item_only_while_slots_remain` (max_jobs 3, expecting Stop::JobLimit with c passed over as 'over the job limit') and `the_batch_goes_on_past_a_skipped_item_only_while_budget_remains` (a budget chosen by running the test and noted in a comment, expecting Stop::BudgetSpent). Add `every_end_of_an_item_has_a_test_that_drives_it`, with the no-wildcard match from `ItemEndKind` to a test name and an `include_str!(\"drain.rs\")` check for `fn <name>(`; Landed, Budget, JobLimit, Stop and Idle map to the tests listed in the decisions.",
+    "In the test module of drain.rs add `sample(kind: ItemEndKind) -> ItemEnd` (exhaustive) and the unit test `finish_agrees_with_the_item_end_list`. It checks that `sample(kind).kind() == kind`, that labels are non-empty and distinct, that `ALL` has 13 entries, and that after `Drain::new(&stub, &Quiet, caps, limits)` and `finish(&item, sample(kind))` the stop equals `after()` (Landed run apart, with rating 3 below the target of 4).",
+    "Add a CHANGELOG.md entry under [Unreleased] > Changed: the request, the finding that the drain already continued past each state (with file:line), the list and its compile-time and run-time checks, the new tests, limits (a sample of the stop timing is not measured with parallel workers; the summary is unchanged by design), and the D190 reference. Add D190 at the end of docs/decisions.md in D189's layout, without the phrases 'Amends' or 'Supersedes'.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`, and `cargo test -p athena-cli --test drain the_batch_goes_on_past_` on its own. Also do the one-arm mutation check from criterion 5 and revert it before finishing, and say so in the report."
+  ],
+  "risks": [
+    {
+      "risk": "The request reads as if the drain stops today, but the code already continues for all eight states, so a reader may expect a behavior change.",
+      "mitigation": "State plainly in the CHANGELOG and D190 that the drain already continued past each state (drain.rs:2036-2053 and 2684-2778) and that the change adds the one list and the tests. The request's 'make it the default' therefore needs no production behavior change, and the producer must not invent one."
+    },
+    {
+      "risk": "The budget-limit test's budget value is brittle, because it depends on the stub costs and caps (tests/drain.rs:39 and 128-134) and on `Budget::fits`.",
+      "mitigation": "The producer sets the number by running the test, keeps a comment showing the sum (a's two reads at 0.1 each, b's read 0.1, run 0.5 and rating 0.2, against c's read and run caps of 1.2), and asserts `Stop::BudgetSpent` exactly. The job-limit variant is deterministic."
+    },
+    {
+      "risk": "Criterion 5 (the tests fail if the pass-over stops the run) cannot be shown by the verifier, who has no command that edits the tree.",
+      "mitigation": "The producer runs the real tree, then states in its report which arm it mutated and which test failed."
+    },
+    {
+      "risk": "The macro could trip clippy or make the list harder to grep.",
+      "mitigation": "A macro with plain `$v:ident => $label:literal` arms, `#[allow]` only if clippy asks, and docs on the generated items. Run clippy locally before finishing."
+    },
+    {
+      "risk": "Calling `finish(Landed)` in the unit test runs `rebuild_if_due` and `rate`, which could set a stop and confuse the agreement check.",
+      "mitigation": "The unit test skips Landed's stop check and runs it separately with a rating of 3 against the target of 4, as `tests::Stub` does (drain.rs:5028-5034), so the rate step sets no stop."
+    },
+    {
+      "risk": "The D187 gate checks new statement-opening phrases in docs/decisions.md for links that no one adds.",
+      "mitigation": "D190 avoids those phrases. If the D187 gate still wants a link, the producer reports it, because docs/decision-links.toml is not a deliverable."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Stop reasons set by `finish` (BudgetSpent, JobLimit, Requested)",
+      "dependent": "crates/athena-cli/src/drain.rs `Drain::finish` Budget, JobLimit and Stop arms (2736-2750), which now take their stop from `ItemEndKind::after()`",
+      "kind": "code",
+      "test": "tests/drain.rs `a_stop_asked_for_mid_run_finishes_the_current_job_and_starts_no_other` (1382), `passed_over_item_is_logged_once_with_its_reason` (6635, job limit and run ended first), the budget tests (`the_pass_reads_only_within_the_budget`, 658), and the new `finish_agrees_with_the_item_end_list` unit test.",
+      "reason": null
+    },
+    {
+      "name": "The environment stop of a failed item",
+      "dependent": "crates/athena-cli/src/drain.rs `StopCause` use at 2729-2734 and `Stop::Environment`",
+      "kind": "code",
+      "test": "tests/drain.rs `low_disk_failing_an_item_twice_also_stops_the_batch` (1214) and `a_check_timeout_or_a_work_failure_failing_an_item_twice_does_not_stop_the_batch` (1287).",
+      "reason": "Not edited. The Failed arm keeps its explicit StopCause check and the list marks Failed as Continues. This is the existing rule and out of scope."
+    },
+    {
+      "name": "Worker loop reading `stopped()` after `finish`",
+      "dependent": "crates/athena-cli/src/drain.rs `take_until_done` (2783), `run_batches` (2868), `run_serial` (2821), which call `finish`, including the parallel workers",
+      "kind": "code",
+      "test": "tests/drain.rs parallel module tests, including `a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn`.",
+      "reason": "The stop is set at the same point as before: after `pass_over` and inside `finish`, before the worker's next `stopped()` check. Only the source of the stop value changes, not its timing."
+    },
+    {
+      "name": "Drain summary and report fields",
+      "dependent": "crates/athena-cli/src/display.rs `display::drain`, the summary, and `Report.queued`, `Report.stop` and `Report.jobs`",
+      "kind": "code",
+      "test": "tests/drain.rs lines 811-830 and 1061-1065, which assert the summary does not repeat the pass-over and that a stays queued.",
+      "reason": "Not changed. The plan adds no field to `Report` and no summary line."
+    },
+    {
+      "name": "The `Stub` struct gains four fields",
+      "dependent": "crates/athena-cli/tests/drain.rs `Stub` struct literals, including `Stub::old_build` (113) and every `Stub { .. }` in the file",
+      "kind": "code",
+      "test": "The whole `cargo test -p athena-cli --test drain` run.",
+      "reason": "Each new field defaults to empty through `Stub::default()`, and every existing literal ends in `..Stub::default()` (for example 788-798, 1004-1018, 1072-1085), so existing scenarios behave as before."
+    },
+    {
+      "name": "Real scope-guard holds for Paused, Flagged and Awaiting",
+      "dependent": "crates/athena-cli/src/drain.rs `RealSteps::held`, `paused` and `flagged` (4455 and nearby) and the real-steps tests at tests/drain.rs 6054, 6096 and 9899-10082",
+      "kind": "code",
+      "test": "tests/drain.rs `drain_real_steps_pass_over_the_item_of_a_line_that_is_flagged_after_two_failures` (6096) and `a_line_with_two_attempts_that_did_not_land_is_held_and_not_retried` (9899).",
+      "reason": "Not edited. `attempts` calls them exactly as before (1963-1971 and 2042-2053)."
+    },
+    {
+      "name": "`Stop` labels and the help text",
+      "dependent": "crates/athena-cli/src/main.rs (drain help text, line ~296) and tests/drain.rs `drain_help_documents_the_flags_and_lists_every_stop_reason` (2500) and `drain_help_says_a_line_with_two_attempts_that_did_not_land_is_held` (10085)",
+      "kind": "code",
+      "test": "tests/drain.rs 2500 and 10085.",
+      "reason": "`Stop` and its `ALL`, `label` and `meaning` are not changed, and no help text is edited."
+    },
+    {
+      "name": "Design note naming `finish` and `ItemEnd::Landed`",
+      "dependent": "docs/design/continuous-landing.md line 35, which cites `finish` and `ItemEnd::Landed` with line numbers",
+      "kind": "rule",
+      "test": null,
+      "reason": "The cited behavior (the rebuild after a landing) is unchanged. Its line numbers are already stale (it cites `finish` at 2428; it is at 2684) and the file is not a deliverable."
+    },
+    {
+      "name": "Governed paths",
+      "dependent": "docs/decision-links.toml `[[governs]]` (line 196) and the D156 gate in `decision_gate`",
+      "kind": "rule",
+      "test": null,
+      "reason": "The only governed decision is D08, which names snapshot.rs and run/candidate.rs. drain.rs is not governed, so the change needs no reconciling link. The new D190 avoids the 'Amends' and 'Supersedes' phrases so the D187 phrase-link check has nothing to link."
+    },
+    {
+      "name": "Text added to CHANGELOG.md and docs/decisions.md",
+      "dependent": "xtask/tests/policy.rs boundary scan, the `[personal_data]` allow-list in athena.toml, and the docs/decisions.md and CHANGELOG.md mirror and structure checks (D162)",
+      "kind": "rule",
+      "test": "`cargo test --locked`, the whole workspace run.",
+      "reason": "The new text uses only plain project terms and no email-like text, and D190 follows the field layout of D189 (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance), which D162 checks."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff for the macro invocation that lists all 13 kinds, for `ItemEndKind::after()` and `ItemEnd::kind()` (no `_ =>` arm in either), and for `finish` calling `end.kind().after()`. Run the unit test.",
+      "command": "git diff crates/athena-cli/src/drain.rs && cargo test -p athena-cli --lib finish_agrees_with_the_item_end_list",
+      "observes": "The list covers Landed, Failed, Budget, JobLimit, Stop, Idle, NeedsAccepting, Held, Skipped, Waiting, Paused, Flagged and Awaiting. The unit test calls `finish` for a sample of each kind and checks the stop it sets equals what `after()` says: BudgetSpent, JobLimit and Requested for the three, none for the rest. `ALL` has no repeated kind or label.",
+      "fails_without": null,
+      "seam": "Existing: `Drain::new` and `Drain::finish` in drain.rs (test module at 4964; `tests::Stub` at 4970 implements `Steps`, and `Drain::new(&lane, &ui, caps, limits)` is already called from tests at 7379). The step that adds `sample(kind) -> ItemEnd` (an exhaustive match) is step 5."
+    },
+    {
+      "criterion": 2,
+      "method": "Read the diff for the no-wildcard match over `ItemEndKind` in tests/drain.rs. Run the test.",
+      "command": "cargo test -p athena-cli --test drain every_end_of_an_item_has_a_test_that_drives_it",
+      "observes": "For every kind in `ItemEndKind::ALL` the match names a driving test, and that test fn is in the file source. A new variant fails to compile at the match, and a deleted driving test fails the assertion.",
+      "fails_without": null,
+      "seam": "Production: `ItemEndKind::ALL` and `after()` (added in step 1). Fixture: `include_str!(\"drain.rs\")` of the test file itself. No double."
+    },
+    {
+      "criterion": 3,
+      "method": "Eight tests, one per continuing state, each building a Stub with items a and b and driving a into one state. Paused: `paused: [(\"a\", pause_text(\"a\"))]`. Flagged: outcomes Rejected, Rejected, Landed plus `flagged: [(\"a\", flag_text(\"a\"))]`. Awaiting: new `held: [(\"a\", <text with 'awaiting diagnosis'>)]`. Failed twice: outcomes Rejected, Rejected, Landed with no flag. Held: new `held_runs: [\"a\"]`, so `run` returns `held: true` with reason 'budget short: ...'. Needs accepting: `needs_accepting: [\"a\"]`. Skipped: new `unread: [\"a\"]`, so the read gives an error twice. Waiting: new `waiting_to_merge: [\"a\"]`, so `land` returns `Landing::Waiting`. A shared helper runs `drain::drain` with the `Stamped` ui and asserts: exactly one line starting `plan       a passed over:` containing the state text and the reason; `report.jobs` has b with outcome 'passed' and landing 'landed'; the log has `run b` and `land b` after a's own calls; `report.landed == 1`; `report.stop == Stop::QueueEmpty`; and the helper asserts the kind's `after()` is `Continues`.",
+      "command": "cargo test -p athena-cli --test drain the_batch_goes_on_past_",
+      "observes": "Each state yields one pass-over line with job a, the state and the reason, then b runs and lands, and the run ends QueueEmpty.",
+      "fails_without": "If the arm of `finish` for that state called `set_stop`, or `attempts` returned a run-ending end, `b` would not run: `stub.log()` would lack `run b` and `land b`, `report.landed` would be 0 and the stop would not be QueueEmpty, so the test fails.",
+      "seam": "Production entry point: `athena_cli::drain::drain(&stub, limits(9.0), &ui)`, with guards `stop_requested`, `paused_reason` and `held_reason` (drain.rs:1958-1971) and the budget and job-limit check (1625-1630). Fixture: `Stub` in tests/drain.rs, injected as the `Steps` argument. It exists today for Paused, Flagged, Failed and NeedsAccepting (fields `paused`, `flagged`, `outcomes`, `needs_accepting`). Step 3 adds `held`, `held_runs`, `unread` and `waiting_to_merge` plus their branches in `Steps::held`, `read`, `run` and `land`. The stub returns scripted inputs only; the continue-or-stop logic under test is the production `Drain`."
+    },
+    {
+      "criterion": 4,
+      "method": "Two tests with items a, b and c, where a is skipped (the reader gives no reading twice, using two job slots because `run_job` counts a start per read, drain.rs:1631). (i) `Limits.max_jobs = 3`: a uses 2, b lands using 1, c finds no slot. Assert `report.stop == Stop::JobLimit`, `report.landed == 1`, and a single pass-over line for c containing 'job limit'. (ii) A budget that covers a's two reads and b's read, run and rating but not c's read cap plus run cap (0.2 + 1.0 beyond what is left). The producer fixes the number by running the test and keeping it with a comment showing the sum. Assert `report.stop == Stop::BudgetSpent` and that c has a pass-over line, and that b landed.",
+      "command": "cargo test -p athena-cli --test drain the_batch_goes_on_past_a_skipped_item_only_while",
+      "observes": "The skipped item is passed over, b lands, and the run then ends with the Stop reason for the exhausted slot or budget; it does not run c.",
+      "fails_without": "If the drain ignored its limits after a pass-over, c would run and `report.stop` would not be JobLimit or BudgetSpent, so the stop assertions fail. If the pass-over stopped the run, b would not land.",
+      "seam": "Production: `drain::drain` with `Limits { max_jobs, budget_usd, .. }` (`Limits` is imported at tests/drain.rs:13). Fixture: the `Stub` with the new `unread` knob (step 3), which gives a's two reads an error. Caps are the stub's 0.2, 1.0 and 0.3 (tests/drain.rs:128-134)."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff of the eight tests, each of which asserts the later item's landing in `report.jobs` and in `stub.log()` and not only the printed line, then run them. The finish-level unit test in criterion 1 also fails if a Continues kind sets a stop. As a mutation check outside the tree, the producer says in its report that it temporarily changed one arm to `set_stop(Stop::Requested)` and saw the matching test fail.",
+      "command": "cargo test -p athena-cli --test drain the_batch_goes_on_past_",
+      "observes": "The test fails when the pass-over for that state ends the run, and passes on the real tree.",
+      "fails_without": "If the pass-over of a state stopped the run, the assertions that b's job line is 'passed' and 'landed', that `land b` is in the log, and that `report.stop == QueueEmpty` all fail. Printing the pass-over line alone is not enough to pass.",
+      "seam": "Same as criterion 3. The mutation is on the production `Drain::finish` and is not committed."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff to confirm that only added lines appear in tests/drain.rs apart from the new Stub fields and their default branches, that the StopCause code at drain.rs:2729-2734 is untouched, that the CHANGELOG.md entry is under [Unreleased] > Changed, and that docs/decisions.md gets only a new D190 entry with no edit to older entries. Run the whole drain test file and the library tests.",
+      "command": "git diff --stat && cargo test -p athena-cli --test drain && cargo test -p athena-cli --lib",
+      "observes": "All existing tests pass, the diff holds no change to Stop::Environment handling or old tests, and the CHANGELOG entry is present.",
+      "fails_without": "If an existing drain test had been changed to fit a new behavior, or the Environment stop had been changed, the unchanged old assertions would fail: low_disk_failing_an_item_twice_also_stops_the_batch (tests/drain.rs:1214), a_failed_job_that_is_not_a_usage_limit_does_not_stop_the_drain_as_one (1267) and the other pass-over tests.",
+      "seam": "Existing tests and `git diff` only. No new seam."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three Athena checks on the final tree.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three pass, which Athena records.",
+      "fails_without": "A formatting error, a clippy warning (for example an unused macro item or a non-exhaustive match) or any failing test fails the run.",
+      "seam": "The cargo commands are the checks Athena runs on the result. No new seam."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "2288be340381264fd9e215d995363411b7c2872a489e6d4da4a98feb312d7273"
+}

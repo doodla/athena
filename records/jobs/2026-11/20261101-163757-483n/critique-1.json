@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-163757-483n",
+  "round": 1,
+  "at": "2026-11-16T04:43:09.856328341Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-agent/src/lib.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-agent/src/lib.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/wiring.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/wiring.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/close.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/close.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The check runs with a fixed environment that can differ from the agent's, so it can hold jobs whose login works",
+      "evidence": "Agents run with `.env_clear().envs(&spec.env)` (claude.rs:558-559). spec.env is built per job by `env::build` (env.rs:65-112) from the target repository's `[agents] env_pass`, `env_pass_if_set` and the capability's `env` templates (env.rs:101-109). That config is read per repository (`JobConfig::at`, run/mod.rs:1045). The plan instead hardcodes HOME, PATH and three credential names, and pins them with `include_str!(\"../../../athena.toml\")`, which is Athena's own config and not the config of the repository a job runs in. Take a repository that passes CLAUDE_CONFIG_DIR, another credential variable, or a capability env that changes HOME. Its agents see a login the check never reads, so `auth status` can say `loggedIn:false` while the agent is logged in. Under decision 7 one such hold sets `Stop::Environment` and ends the drain, so every job in that repository would be held for nothing. The plan's rule that only a positive answer holds does not help, because a wrong `loggedIn:false` is a positive answer. Fix: Give the check the same environment the agent gets. For example, change the method to `login(&self, env: &BTreeMap<String,String>, within: Duration)`. In `Athena::login_gate`, build the env with `athena_agent::env::build` from the job's `jc.config.agents` and the capability env. If that is not possible at dispatch, pass at least `env_pass` and `env_pass_if_set` from `jc`. Drop the hardcoded AUTH_ENV and its include_str test. Add a test that a variable named only in the job config reaches the check.",
+      "location": "Decision 3; Step 2 (AUTH_ENV, login_probe); claude.rs test auth_env_is_listed_in_the_repository_env_pass_if_set",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Not every agent stage is checked: planner and critic rounds after the first, producer loop rounds and the reader re-run after a config change",
+      "evidence": "Criterion 1 asks for the check 'before each agent stage'. Planner and critic are invoked once per round (planning.rs:438, :642). The producer loop can invoke the producer more than once (producer.rs:392). On a config change, dispatch re-runs the reader (mod.rs:1053) before the planned check at :1092. Stage timeouts are 86400 s (athena.toml:50-52), so one check at dispatch with a 3600 s look-ahead does not cover a long planning phase. Fix: Either check before each planning round and each producer round (a hold before the producer, with no candidate, through commit_hold as in gate 2), or say plainly in D190 and in an open question that 'agent stage' here means planning, producer and verifier, so the verifier judges criterion 1 against that statement.",
+      "location": "Decision 6 (planner and critic covered by gate 1 only) and decision 8; criterion 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'expires within the stage deadline' half depends on a field name nothing in the repository documents",
+      "evidence": "The plan says no expiry field is documented anywhere. The repository shows only `loggedIn` and the auth method (athena-v0.md:1768; xtask/src/main.rs:793-796). The JSON fixtures in the tests contain the made-up field, so they pass while the real binary may never print it. Fix: Keep the safe default (a missing field counts as Valid). In D190 and the CHANGELOG entry, say that in production the expiry half is unverified and probably inactive until the field is confirmed. Do not present it as delivered.",
+      "location": "Decision 3 (expiresAt in epoch ms)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two details the drain classification relies on are not stated",
+      "evidence": "The drain builds the reason as `format!(\"{error:#}\")` (drain.rs:4722) and classifies it by its start (drain.rs:1747-1761). The LOGIN_EXPIRED case only works if `LoginHold`'s Display starts with `text()`. SlotWait's Display does (disk.rs:303-309). Also, `held` today includes `short` (BudgetShort, drain.rs:4726). The helper as described lists only LowDisk, SlotWait and LoginHold. Fix: State that `LoginHold`'s Display starts with `text()`. Keep `short ||` next to the new `held_by_environment(&error)` call, or include BudgetShort in the helper and rename it.",
+      "location": "Steps 3 and 8 (LoginHold Display; held_by_environment)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stub repeats its last answer, so test (c)'s retry would be held again unless the script can be changed",
+      "evidence": "StubLogin 'pops scripted answers (the last one repeats)'. The script for (c) is `[Valid, Valid, Lapses]`, so the retry would get Lapses and be held again. Fix: Give StubLogin a shared handle (for example Arc<Mutex<VecDeque>>) the test keeps, and push Valid before calling retry. Or script (c) as `[Valid, Valid, Lapses, Valid]`.",
+      "location": "Step 7 / Criterion 3 test (c)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is careful and mostly sound. It adds a default trait method `AgentDriver::login`, forwarded through `DeferredDriver`, and checks the login at three points in run/mod.rs: dispatch, before the producer and before the verifier. Holds reuse `commit_hold`. The core tests drive `Athena::go` with a scripted stub that holds no gate logic. I confirmed from the code: the three driver implementations (fake.rs:79, claude.rs:473, wiring.rs:143); `hold_for_disk` and `commit_hold` in close.rs (:177, :216) and what they do; `AnyHold` with its exhaustive match in `go_job` (mod.rs:497-501); the dispatch disk check at mod.rs:1092; the resume mark at :1949; the `verification_stage` call at :2271; the drain's held handling (drain.rs:1745-1771, 4726-4730); and the public `Athena.driver` field (lib.rs:233). One major soundness problem: the real check runs `claude auth status` with a fixed variable list pinned to Athena's own athena.toml. Agents get a per-job environment built from the target repository's config (`env::build`, env.rs:65-112, passed at claude.rs:558-559). The check can therefore disagree with the agent and falsely hold every job; one hold now stops the whole drain. Minor findings: planner and critic rounds after the first, producer loop rounds and the reader re-run are not checked; the expiry field is a guess; two details of the drain text match; and test (c) needs a stub whose answer can be changed. Athena's three findings about files outside the deliverables are answered by decision 1 and not repeated."
+}
