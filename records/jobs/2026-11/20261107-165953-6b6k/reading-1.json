@@ -1,0 +1,144 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261107-165953-6b6k",
+  "n": 1,
+  "at": "2026-11-17T02:44:15.015820635Z",
+  "invocation_seq": 1,
+  "base_commit": "f7fa2e61045355b257c9c339cd2d8e991612f551",
+  "config_sha256": "990630bc38840ea4ecd2c389267d7d81a35d57a94b08e612272f5d85c9b743c2",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Show title and state on drain/batch job log lines; add status-check",
+  "summary": "Drain and batch log lines that name a job will also show the first line of its request and, for an ended job, its state (landed, rejected, failed, interrupted) and a one-line reason. A new default in defaults.toml tells the person running Athena's agent to run `athena status <job>` and quote the job id, title and state before reporting an outcome. The audience is the agent that reads these logs, and the goal is to stop it pinning a state on the wrong job.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "A new test covers the batch with a rejected, an interrupted and a running job; fmt, clippy and test criteria are included."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criteria check the title and state shown per line, with a test that fails if the lines are swapped."
+    },
+    {
+      "id": "mechanism",
+      "how": "The log format is enforced by a test. The agent rule is a defaults entry and is prose-only."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-cli/src/drain.rs emits the 'drain      {item} → {job} ({outcome})' line through self.ui.line near line 1520 and the 'plan       {id} passed over' line in pass_over. crates/athena-cli/src/main.rs has the Status command (line 427, dispatched at line 1120 to commands::status) and DrainStatus, and it prints through eprintln at lines 737 and 758. The request names only main.rs, but the log lines are built in drain.rs, so drain.rs is the main edit site. No records or data file is added, so check_record_file and AnyRecord are not touched.",
+    "Existing code: reuse the commands::status path in crates/athena-cli/src/main.rs and the one_line helper in crates/athena-cli/src/drain.rs for the title and reason text. Reuse the existing job-state lookup, and do not add a second state source.",
+    "Field meaning: the 'state' shown is the job's recorded outcome, the same value `athena status <job>` reports. The producer must read it from the same record rather than infer it from log text.",
+    "The 'person running Athena's agent' wording in the request is read as the agent that operates Athena and reads its logs. The rule becomes a new [[default]] entry in defaults.toml, with applies_to [\"*\"] and a source citing the three misreports (Oct 31 and twice on Nov 7).",
+    "Prompt budget risk: defaults.toml is composed into the reader prompt, which has 2 tokens left of its 2000-token budget. A new default will likely exceed it. The producer must either keep the statement very short and trim other wording, or raise the reader budget in athena.toml with a recorded reason. The prompt token budget test must pass either way.",
+    "Environment: none; no CI, push, PR or records read is involved."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test batch has one rejected, one interrupted and one running job. Each drain/batch log line for those jobs shows the job's request title (first line) and the right state (rejected, interrupted, running with no end state) and a one-line reason for ended jobs. The test fails if the lines are swapped. Run `cargo test` and cite the new test by name.",
+      "kind": "behavior"
+    },
+    {
+      "text": "defaults.toml has a new [[default]] entry that tells the agent to run `athena status <job>` before reporting any job's outcome and to quote the job id, request title and recorded state. The entry has an id, a source citing the Oct 31 and Nov 7 misreports, and applies_to set.",
+      "kind": "content"
+    },
+    {
+      "text": "The prompt token budget test and the boundary word test still pass. Run `cargo test` and cite both results. If athena.toml's budget was raised, the diff shows it and the reason.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A log line for a job that has not ended (running) shows its title and no end state or reason. A line for a job whose title cannot be read still prints and does not panic. Cite the tests run with `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md records the change. The diff touches only the log-line code, its tests, defaults.toml, CHANGELOG.md and any required budget line, and changes no other behavior.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy` and `cargo test` pass, all as their own commands or as Athena-recorded checks on the final tree.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "defaults.toml",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.5
+    }
+  ],
+  "out_of_scope": [
+    "Changing `athena status` output or semantics",
+    "Changing job states or how they are recorded",
+    "Editing docs/decisions.md entries or anything under records/",
+    "Prompt file rewrites beyond the budget fit"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.6,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2300.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7080402010050252,
+      "p_verification_passes": 0.6858552631578947,
+      "p_user_intervenes": 0.06017699115044248,
+      "cost_usd": {
+        "p10": 0.5540958486904357,
+        "p50": 1.5358,
+        "p90": 6.46785557175874
+      },
+      "wall_time_s": {
+        "p10": 608.8643803587555,
+        "p50": 2206.9206192650086,
+        "p90": 4579.061116825767
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass odds than the reference. The reader prompt budget has 2 tokens left, so the new default will probably need budget handling, and the log lines are built in drain.rs, not only main.rs.",
+  "hard_reason": "It changes the drain's log output and adds a defaults entry that goes into the reader prompt. The prompt token budget is nearly exhausted, so a mistake there is costly.",
+  "producer_effort": "high"
+}
